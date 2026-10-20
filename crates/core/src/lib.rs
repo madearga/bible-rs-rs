@@ -10,7 +10,11 @@
 #![warn(missing_docs)]
 
 pub mod books;
+pub mod model;
 pub mod reference;
 
 pub use books::{Book, Testament, BOOK_COUNT, CHAPTER_COUNT, VERSE_COUNT};
+pub use model::{
+    Mark, MarkKind, Span, SpanStyle, Translation, TranslationBuilder, TranslationMeta, Verse,
+};
 pub use reference::Reference;
