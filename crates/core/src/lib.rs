@@ -10,10 +10,12 @@
 #![warn(missing_docs)]
 
 pub mod books;
+pub mod format;
 pub mod model;
 pub mod reference;
 
-pub use books::{Book, Testament, BOOK_COUNT, CHAPTER_COUNT, VERSE_COUNT};
+pub use books::{BOOK_COUNT, Book, CHAPTER_COUNT, Testament, VERSE_COUNT};
+pub use format::{FORMAT_VERSION, MAGIC, decode, encode};
 pub use model::{
     Mark, MarkKind, Span, SpanStyle, Translation, TranslationBuilder, TranslationMeta, Verse,
 };
