@@ -216,6 +216,7 @@ the binary.
 | `THIRD_PARTY.md` | This file |
 | `OFL-Inter.txt` | The Open Font License for Inter |
 | `OFL-Literata.txt` | The Open Font License for Literata |
+| `build-info.txt` | The digest and size of the binary the bundle was built from |
 
 ## The clean-room rewrite
 
