@@ -31,6 +31,7 @@ pub mod reader;
 pub mod search_panel;
 pub mod selection;
 pub mod shortcuts;
+pub mod sidebar;
 pub mod theme;
 pub mod typography;
 pub mod verse_menu;
