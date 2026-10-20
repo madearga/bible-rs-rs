@@ -10,7 +10,7 @@ You may write only inside the new repository. Create or edit:
   crates/core/src/search/corpus.rs   the normalized corpus
   crates/core/src/search/scan.rs     the scanner
   crates/core/tests/search_*.rs     the tests
-  crates/core/Cargo.toml             add the dependencies you need
+  crates/core/Cargo.toml             already declares every dependency this unit needs; do not edit it
   crates/core/benches/search.rs      the benchmark
 Do not touch any other path. In particular do not touch books.rs, model.rs, format.rs, or
 reference.rs. Another unit owns those, and your unit builds on the API they define.
