@@ -14,6 +14,7 @@ pub mod books;
 pub mod format;
 pub mod model;
 pub mod reference;
+pub mod search;
 pub mod study;
 
 pub use books::{BOOK_COUNT, Book, CHAPTER_COUNT, Testament, VERSE_COUNT};
@@ -22,6 +23,7 @@ pub use model::{
     Mark, MarkKind, Span, SpanStyle, Translation, TranslationBuilder, TranslationMeta, Verse,
 };
 pub use reference::Reference;
+pub use search::{Corpus, Hit, MatchMode, Query, Scope, Term, normalize};
 pub use study::{
     Bookmark, HighlightColour, Note, SETTINGS_WRITE_INTERVAL, Settings, Store, StudyData, Theme,
 };
