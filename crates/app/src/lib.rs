@@ -22,13 +22,21 @@ use bible_core::{Translation, format};
 use serde::{Deserialize, Serialize};
 
 pub mod app;
+pub mod book_picker;
 pub mod bundled;
 pub mod cli;
+pub mod history;
+pub mod palette;
 pub mod reader;
+pub mod search_panel;
 pub mod selection;
+pub mod shortcuts;
 pub mod theme;
 pub mod typography;
+pub mod verse_menu;
 
+#[cfg(test)]
+mod palette_test;
 #[cfg(test)]
 mod reader_tests;
 
