@@ -2,3 +2,14 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+
+# The data build downloads the raw USFM archives into the cache and imports them
+# from there. Only the derived .bbl files under data/translations are committed;
+# the raw scripture sources and the zips are never part of the repository.
+/target/data-cache/
+/data/raw/
+*.usfm
+*.sfm
+*_usfm.zip
+data/translations/*.part
+data/translations/*.tmp
