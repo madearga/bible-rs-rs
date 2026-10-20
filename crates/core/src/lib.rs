@@ -10,5 +10,7 @@
 #![warn(missing_docs)]
 
 pub mod books;
+pub mod reference;
 
 pub use books::{Book, Testament, BOOK_COUNT, CHAPTER_COUNT, VERSE_COUNT};
+pub use reference::Reference;
