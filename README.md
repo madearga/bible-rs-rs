@@ -35,9 +35,14 @@ open dist/Bible.app
 ```
 
 The bundle is signed ad-hoc, which is a local placeholder rather than a
-developer identity, and it is not notarized. The first time you open it, macOS
-refuses it. Right-click the bundle in Finder and choose **Open**, then confirm.
-After that it opens normally.
+developer identity, and it is not notarized. macOS Gatekeeper does not
+recognise an ad-hoc signature as a trusted one, so if the bundle arrives with
+a quarantine attribute, macOS refuses to run it the first time. Right-click
+the bundle in Finder and choose **Open**, then confirm. After that it opens
+normally.
+
+A bundle that you built yourself has no quarantine attribute, so `open` starts
+it without a prompt.
 
 You can also run the binary inside the bundle directly:
 

@@ -175,6 +175,8 @@ else
 fi
 
 log "Bundle written to $BUNDLE_DIR"
-log "It is an unsigned developer build. macOS will refuse to open it the first time."
-log "Open it from Finder with a right click, or run:"
+log "It is an unsigned developer build with an ad-hoc signature."
+log "A bundle you built here has no quarantine attribute, so open it with:"
 log "  open \"$BUNDLE_DIR\""
+log "A bundle that arrived from somewhere else carries a quarantine attribute."
+log "macOS refuses it the first time, so right-click it in Finder and choose Open."
