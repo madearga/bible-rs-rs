@@ -326,7 +326,9 @@ fn parse_text(source: &str, id: &str, path: &Path) -> Result<Translation> {
 }
 
 /// Writes the study data out as JSON or Markdown from the same SQLite store the
-/// window opens, so an export always sees the reader's live study data.
+/// window opens. The export sees committed database data; a GUI store that is
+/// still holding a throttled settings write in memory is not included until it
+/// flushes or closes.
 fn export(positional: &[String], flags: &BTreeMap<String, String>) -> Result<()> {
     let Some(path) = positional.first() else {
         return Err(UsageError("export needs an output path".to_owned()).into());
