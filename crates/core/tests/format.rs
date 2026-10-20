@@ -193,6 +193,9 @@ fn decode_benchmark() {
         bytes.len(),
         elapsed.as_secs_f64() * 1000.0
     );
+    // The budget is a release-mode number; a debug build runs several times slower
+    // without the code being wrong, so only assert it where it was measured.
+    #[cfg(not(debug_assertions))]
     assert!(
         elapsed.as_secs_f64() < 0.050,
         "decode took {:.3} ms, the budget is 50 ms",
