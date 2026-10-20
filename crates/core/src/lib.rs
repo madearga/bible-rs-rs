@@ -8,4 +8,5 @@
 //! depends on a GUI.
 
 pub mod books;
+pub mod format;
 pub mod model;
