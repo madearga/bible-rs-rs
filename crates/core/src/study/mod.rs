@@ -24,7 +24,8 @@
 mod export;
 pub mod record;
 
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -85,6 +86,8 @@ impl Mirror {
 pub struct Store {
     /// The database connection. Every write commits before the mirror changes.
     connection: Connection,
+    /// The exclusive lifetime lock for a file-backed store.
+    _lock: Option<File>,
     /// The in-memory copy every read is served from.
     mirror: Mirror,
     /// The settings in force, which may be newer than the stored row.
@@ -104,19 +107,38 @@ impl Store {
     /// has to wait on a query.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let lock_path = lock_path(path);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| {
+                format!(
+                    "could not open the study store lock at {}",
+                    lock_path.display()
+                )
+            })?;
+        lock.try_lock().with_context(|| {
+            format!(
+                "the study store at {} is busy; close the other Bible window or command and try again",
+                path.display()
+            )
+        })?;
         let connection = Connection::open(path)
             .with_context(|| format!("could not open the study store at {}", path.display()))?;
-        Self::from_connection(connection)
+        Self::from_connection(connection, Some(lock))
     }
 
     /// Opens a store that lives only as long as the handle, for tests and for a
     /// preview that must not touch the reader's real data.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
     /// Sets up the schema and the mirror on an open connection.
-    fn from_connection(connection: Connection) -> Result<Self> {
+    fn from_connection(connection: Connection, lock: Option<File>) -> Result<Self> {
         // WAL is a property of the file, not of the connection, but it is
         // idempotent and cheap to reassert on every open.
         let _mode: String = connection
@@ -149,6 +171,7 @@ impl Store {
 
         Ok(Self {
             connection,
+            _lock: lock,
             mirror,
             settings,
             settings_written_at: Instant::now(),
@@ -444,6 +467,13 @@ impl Store {
     pub fn close(mut self) -> Result<()> {
         self.flush()
     }
+}
+
+/// Returns the separate file used to lock a file-backed store for its lifetime.
+fn lock_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_owned();
+    path.push(".lock");
+    PathBuf::from(path)
 }
 
 /// Turns a reference into its global verse index, which is the key of every

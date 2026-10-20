@@ -406,7 +406,7 @@ fn scroll_benchmark() {
     let elapsed = started.elapsed();
     let per_frame = elapsed.as_secs_f64() * 1_000_000.0 / f64::from(frames);
     println!(
-        "scroll_benchmark: {per_frame:.2} microseconds of CPU per frame over {frames} frames, \
+        "scroll_benchmark: {per_frame:.2} microseconds of wall time per frame over {frames} frames, \
          {} chapters placed, {} chapter layouts",
         placements,
         reader.layout_calls()
@@ -416,6 +416,9 @@ fn scroll_benchmark() {
         books::BOOK_COUNT as u8 - 1,
         "the scroll did not reach the last book of the Bible"
     );
+    // The budget is a release-mode number; a debug build runs several times
+    // slower without the code being wrong, so only assert it where it was measured.
+    #[cfg(not(debug_assertions))]
     assert!(
         per_frame < 1000.0,
         "scrolling costs {per_frame:.2} microseconds per frame, over the 1000 microsecond budget"

@@ -163,13 +163,26 @@ impl ReaderApp {
         reference: Reference,
         library: Library,
         translation: Arc<Translation>,
-        status: String,
+        mut status: String,
         data: &std::path::Path,
     ) -> Self {
         theme::install(&cc.egui_ctx, theme);
-        let study = Store::open(data.join("study.db"))
-            .or_else(|_| Store::open_in_memory())
-            .expect("an in-memory study store always opens");
+        let study = match Store::open(data.join("study.db")) {
+            Ok(study) => study,
+            Err(error) => {
+                // Keep the window usable, but say plainly that nothing will be
+                // saved rather than presenting the in-memory fallback as the
+                // reader's persisted study data.
+                let notice =
+                    format!("study data is not being saved and will be lost on exit: {error:#}");
+                status = if status.is_empty() {
+                    notice
+                } else {
+                    format!("{status}; {notice}")
+                };
+                Store::open_in_memory().expect("an in-memory study store always opens")
+            }
+        };
         // The store remembers where the reader was, so a window opens where the
         // last one stopped rather than at the first page.
         let remembered = study.settings().position;
