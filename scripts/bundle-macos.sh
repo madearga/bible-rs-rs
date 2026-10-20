@@ -31,6 +31,7 @@ BUNDLE_ID="com.madearga.bibblereader"
 BUNDLE_DIR="$REPO_ROOT/dist/$APP_NAME.app"
 MACOS_DIR="$BUNDLE_DIR/Contents/MacOS"
 RESOURCES_DIR="$BUNDLE_DIR/Contents/Resources"
+POSTSIGN_RECORD="$REPO_ROOT/dist/build-info.postsign.txt"
 
 # The bundle ships the release binary only. The translations are compiled into
 # the binary, and the fonts are compiled into the binary as well, so nothing
@@ -55,18 +56,39 @@ require_tool cargo
 require_tool plutil
 require_tool file
 require_tool shasum
+require_tool python3
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   fail "this bundle is for macOS and this machine is $(uname -s)"
 fi
 
-# Build the release binary. Cargo decides whether anything needs recompiling,
-# and the fingerprint it keeps makes a rerun a no-op when nothing changed.
+# Build the release binary and select the exact executable Cargo reports. This
+# handles CARGO_BUILD_TARGET and target settings in .cargo/config.toml instead
+# of guessing target/release/bible.
 log "Building the release binary."
-cargo build --release -p bible-app
-
-BINARY_PATH="$TARGET_DIR/release/bible"
-[[ -f "$BINARY_PATH" ]] || fail "cargo did not produce $BINARY_PATH"
+BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/bible-build.XXXXXX")" || fail "cannot create the Cargo output log"
+cleanup_build_log() { rm -f "$BUILD_LOG"; }
+trap cleanup_build_log EXIT
+if ! cargo build --release -p bible-app --message-format=json-render-diagnostics >"$BUILD_LOG" 2>&1; then
+  cat "$BUILD_LOG" >&2
+  fail "cargo build failed"
+fi
+BINARY_PATH="$(python3 - "$BUILD_LOG" <<'PY'
+import json, pathlib, sys
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if message.get("reason") == "compiler-artifact" and message.get("target", {}).get("name") == "bible":
+        executable = message.get("executable")
+        if executable:
+            print(executable)
+            break
+PY
+)"
+[[ -n "$BINARY_PATH" ]] || fail "cargo did not report the bible executable"
+[[ -f "$BINARY_PATH" ]] || fail "cargo reported a missing executable at $BINARY_PATH"
 [[ -x "$BINARY_PATH" ]] || fail "$BINARY_PATH is not executable"
 
 # Refuse to bundle a binary that does not look like the one this build
@@ -78,15 +100,21 @@ case "$FILE_INFO" in
   *) fail "$BINARY_PATH is not a Mach-O binary: $FILE_INFO" ;;
 esac
 
-# Replace the bundle rather than merging into it. Merging leaves files from an
-# earlier build behind, and a bundle with a stale file in it is not the build
-# the reviewer thinks it is. The delete is scoped to the one directory this
-# script owns, under dist/, and the guard refuses anything else.
+# Validate the physical output directory before any mutation. A symlinked
+# dist/ or Bible.app could make a path-shaped guard delete outside the repo.
+DIST_DIR="$REPO_ROOT/dist"
+[[ -L "$DIST_DIR" ]] && fail "refusing symlinked output directory $DIST_DIR"
+mkdir -p "$DIST_DIR"
+DIST_REAL="$(cd "$DIST_DIR" && pwd -P)" || fail "cannot resolve $DIST_DIR"
+REPO_REAL="$(cd "$REPO_ROOT" && pwd -P)" || fail "cannot resolve $REPO_ROOT"
+[[ "$DIST_REAL" == "$REPO_REAL/dist" ]] || fail "output directory $DIST_DIR resolves to $DIST_REAL, outside the repository"
+[[ -L "$BUNDLE_DIR" ]] && fail "refusing symlinked bundle $BUNDLE_DIR"
+# The bundle itself is the only child this script deletes, and it must not be a
+# symlink. Its parent is the physical dist directory validated above.
+
+# Replace the bundle rather than merging into it. The physical containment
+# checks above run before this deletion.
 if [[ -e "$BUNDLE_DIR" ]]; then
-  case "$BUNDLE_DIR" in
-    "$REPO_ROOT/dist/$APP_NAME.app") ;;
-    *) fail "refusing to delete $BUNDLE_DIR, which is not the bundle this script builds" ;;
-  esac
   find "$BUNDLE_DIR" -depth -delete
 fi
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
@@ -95,29 +123,47 @@ cp "$BINARY_PATH" "$MACOS_DIR/$BINARY_NAME"
 chmod 755 "$MACOS_DIR/$BINARY_NAME"
 
 # The bundled copy has to be the binary cargo just produced. Comparing the two
-# byte for byte catches a stale binary in the target directory, which is the
-# failure a reviewer would otherwise have to notice by hand.
+# byte for byte catches a stale binary in the target directory.
 if ! cmp -s "$BINARY_PATH" "$MACOS_DIR/$BINARY_NAME"; then
   fail "the bundled binary is not the binary cargo just built at $BINARY_PATH"
 fi
 
-# Record what was built, so a reviewer can check the bundle against a later
-# build without rebuilding the whole thing. The digest is of the binary as
-# cargo produced it, before the ad-hoc signature is added, because signing
-# changes the bytes on disk.
-BUILT_DIGEST="$(shasum -a 256 "$BINARY_PATH" | cut -d' ' -f1)"
-BUILT_SIZE="$(stat -f %z "$BINARY_PATH")"
-{
-  printf 'binary %s\n' "$BINARY_NAME"
-  printf 'source-binary %s\n' "$BINARY_PATH"
-  printf 'source-sha256 %s\n' "$BUILT_DIGEST"
-  printf 'source-size %s\n' "$BUILT_SIZE"
-  printf 'bundle-id %s\n' "$BUNDLE_ID"
-} > "$RESOURCES_DIR/build-info.txt"
+# The manifest records the digest of the executable as it will be in the
+# bundle, that is after signing. It is written after the signing step so the
+# signature covers it and the file inside the bundle is the signed one.
 
 # The property list. The identifier is a local development identifier, and the
 # bundle carries no icon and no resources beyond the notices, so the window
 # falls back to the system's generic application icon.
+#
+# LSMinimumSystemVersion is derived from the executable's own minimum macOS
+# version rather than written by hand, so the plist cannot claim a system
+# version the binary does not support.
+BINARY_MIN_OS="$(python3 - "$MACOS_DIR/$BINARY_NAME" <<'PY'
+import subprocess, sys
+out = subprocess.run(
+    ["otool", "-l", sys.argv[1]], capture_output=True, text=True, check=True
+).stdout
+versions = []
+lines = out.splitlines()
+for index, line in enumerate(lines):
+    if "LC_BUILD_VERSION" in line or "LC_VERSION_MIN_MACOSX" in line:
+        for follow in lines[index + 1:index + 5]:
+            parts = follow.split()
+            if parts and parts[0] == "minos":
+                raw = parts[1]
+                if "." in raw:
+                    major, minor = raw.split(".")[:2]
+                    versions.append((int(major), int(minor)))
+                break
+if not versions:
+    print("")
+else:
+    print("%d.%d" % max(versions))
+PY
+)"
+[[ -n "$BINARY_MIN_OS" ]] || fail "cannot read the minimum macOS version from $MACOS_DIR/$BINARY_NAME"
+
 cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -142,7 +188,7 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key>
   <string>0.1.0</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>$BINARY_MIN_OS</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>
@@ -154,24 +200,88 @@ PLIST
 plutil -lint "$BUNDLE_DIR/Contents/Info.plist" >/dev/null || fail "the generated Info.plist does not lint"
 
 # The notices that have to travel with the binary: the licence of this program,
-# the third-party notices, and the font licences for the faces compiled into it.
+# the third-party notices, the collected licence texts, and the font licences
+# for the faces compiled into it.
 cp "$REPO_ROOT/LICENSE" "$RESOURCES_DIR/LICENSE"
 cp "$REPO_ROOT/THIRD_PARTY.md" "$RESOURCES_DIR/THIRD_PARTY.md"
 cp "$REPO_ROOT/assets/fonts/OFL-Inter.txt" "$RESOURCES_DIR/OFL-Inter.txt"
 cp "$REPO_ROOT/assets/fonts/OFL-Literata.txt" "$RESOURCES_DIR/OFL-Literata.txt"
 
+# The licence texts of the shipped dependencies. The collector fails when a
+# required licence file is missing, so the bundle never claims completeness it
+# does not have.
+# Collection is mandatory: the check fails when a crate in the runtime closure
+# has no notice text, so the bundle cannot be produced with a silent gap.
+python3 "$REPO_ROOT/scripts/collect-licenses.py" --check --output "$REPO_ROOT/LICENSES" >/dev/null \
+  || fail "the dependency notices in $REPO_ROOT/LICENSES are missing or stale; run scripts/collect-licenses.py"
+mkdir -p "$RESOURCES_DIR/LICENSES"
+find "$REPO_ROOT/LICENSES" -type f -print0 | while IFS= read -r -d '' notice; do
+  cp "$notice" "$RESOURCES_DIR/LICENSES/$(basename "$notice")"
+done
+NOTICE_COUNT="$(find "$RESOURCES_DIR/LICENSES" -type f | wc -l | tr -d ' ')"
+[[ "$NOTICE_COUNT" -gt 0 ]] || fail "the LICENSES folder is empty, so the bundle ships no dependency notices"
+cmp -s "$REPO_ROOT/LICENSES/INDEX.md" "$RESOURCES_DIR/LICENSES/INDEX.md" \
+  || fail "the bundled licence index is not the collected index"
+log "Copied $NOTICE_COUNT dependency notices into Contents/Resources/LICENSES."
+
 # Sign the bundle ad-hoc. This is not a developer identity, it is not a
 # distribution signature, and it does not make the bundle notarizable. It
 # exists so the system treats the bundle as a signed application and gives a
 # stable identity to the binary rather than refusing it outright.
-if command -v codesign >/dev/null 2>&1; then
+sign_bundle() {
   if ! SIGN_OUTPUT="$(codesign --force --sign - --timestamp=none "$BUNDLE_DIR" 2>&1)"; then
     printf '%s\n' "$SIGN_OUTPUT" >&2
     fail "the ad-hoc signature could not be applied"
   fi
+}
+
+if command -v codesign >/dev/null 2>&1; then
+  sign_bundle
   log "Signed the bundle ad-hoc. The signature is a local placeholder, not a developer identity."
 else
   log "codesign is not on the PATH, so the bundle is left unsigned."
+fi
+
+# The in-bundle manifest records what was built: the source binary, its digest,
+# the derived minimum macOS version, and the architectures. It is written
+# before the signature below, so codesign seals it with the rest of the bundle.
+SOURCE_DIGEST="$(shasum -a 256 "$BINARY_PATH" | cut -d' ' -f1)"
+SOURCE_SIZE="$(stat -f %z "$BINARY_PATH")"
+{
+  printf 'binary %s\n' "$BINARY_NAME"
+  printf 'bundle-id %s\n' "$BUNDLE_ID"
+  printf 'source-binary %s\n' "$BINARY_PATH"
+  printf 'source-sha256 %s\n' "$SOURCE_DIGEST"
+  printf 'source-size %s\n' "$SOURCE_SIZE"
+  printf 'minimum-macos %s\n' "$BINARY_MIN_OS"
+  printf 'architectures %s\n' "$(lipo -archs "$MACOS_DIR/$BINARY_NAME" 2>/dev/null | tr ' ' ',')"
+} > "$RESOURCES_DIR/build-info.txt"
+
+# A signature that seals a manifest cannot have that manifest contain the
+# signature's own hash: changing the manifest changes the executable's
+# signature and therefore its digest. The post-sign record is written beside
+# the bundle instead. It names the executable digest and codesign's own
+# CDHash for the final signed bundle, and the verifier checks both.
+if [[ "$(command -v codesign >/dev/null 2>&1 && echo yes)" == "yes" ]]; then
+  sign_bundle
+  codesign --verify --deep --strict "$BUNDLE_DIR" >/dev/null 2>&1 \
+    || fail "the signed bundle does not verify after the manifest was sealed into it"
+  FINAL_DIGEST="$(shasum -a 256 "$MACOS_DIR/$BINARY_NAME" | cut -d' ' -f1)"
+  FINAL_SIZE="$(stat -f %z "$MACOS_DIR/$BINARY_NAME")"
+  FINAL_CDHASH="$(codesign --display --verbose=4 "$BUNDLE_DIR" 2>&1 | sed -n 's/^CDHash=//p' | head -1)"
+  [[ -n "$FINAL_CDHASH" ]] || fail "codesign did not report a CDHash for the signed bundle"
+  {
+    printf 'bundle %s\n' "$BUNDLE_DIR"
+    printf 'bundled-sha256 %s\n' "$FINAL_DIGEST"
+    printf 'bundled-size %s\n' "$FINAL_SIZE"
+    printf 'cdhash %s\n' "$FINAL_CDHASH"
+    printf 'source-binary %s\n' "$BINARY_PATH"
+    printf 'source-sha256 %s\n' "$SOURCE_DIGEST"
+    printf 'source-size %s\n' "$SOURCE_SIZE"
+    printf 'minimum-macos %s\n' "$BINARY_MIN_OS"
+    printf 'architectures %s\n' "$(lipo -archs "$MACOS_DIR/$BINARY_NAME" 2>/dev/null | tr ' ' ',')"
+  } > "$POSTSIGN_RECORD"
+  log "Recorded the final signed executable digest in $POSTSIGN_RECORD."
 fi
 
 log "Bundle written to $BUNDLE_DIR"

@@ -17,3 +17,6 @@
 *_usfm.zip
 data/translations/*.part
 data/translations/*.tmp
+
+# Python bytecode from the local scripts.
+__pycache__/
