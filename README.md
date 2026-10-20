@@ -25,8 +25,15 @@ The script needs a Rust toolchain and the Xcode command line tools. It writes
 `dist/Bible.app` and installs nothing anywhere. Run it again after changing the
 code and the bundle is rebuilt from scratch.
 
-The script honours `CARGO_TARGET_DIR` if you set it, and it reads the release
-binary back out of the same directory cargo put it in.
+The script honours `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET`. It selects the
+executable path Cargo reports for the build rather than assuming
+`target/release/bible`, so a target-specific output directory is handled and a
+stale binary from an earlier host build is not picked up.
+
+The bundle's `LSMinimumSystemVersion` is read from the executable's own Mach-O
+load commands and checked against them by the verifier. This build is a
+host-only `arm64` binary; it is not a universal binary, and it does not promise
+macOS 13 or any other version the binary does not declare.
 
 ### Open the bundle
 
@@ -37,12 +44,15 @@ open dist/Bible.app
 The bundle is signed ad-hoc, which is a local placeholder rather than a
 developer identity, and it is not notarized. macOS Gatekeeper does not
 recognise an ad-hoc signature as a trusted one, so if the bundle arrives with
-a quarantine attribute, macOS refuses to run it the first time. Right-click
-the bundle in Finder and choose **Open**, then confirm. After that it opens
-normally.
+a quarantine attribute, the first launch is refused. There is no guaranteed
+Finder shortcut that bypasses this on current macOS. On macOS Sequoia (15), the
+documented route is **System Settings > Privacy & Security**, scroll to
+**Security**, and click **Open Anyway** for the blocked app, then authenticate.
+macOS may still refuse the app, and a later OS update may change the flow.
 
-A bundle that you built yourself has no quarantine attribute, so `open` starts
-it without a prompt.
+The bundle does not remove the quarantine attribute, disable Gatekeeper, or
+change any security setting. A bundle you built yourself on this machine has no
+quarantine attribute, so `open` starts it without a prompt.
 
 You can also run the binary inside the bundle directly:
 
@@ -62,7 +72,13 @@ and never writes to it.
 It checks the bundle layout, lints the `Info.plist` with `plutil`, reads the
 binary's architecture with `file` and `lipo`, verifies the signature with
 `codesign`, and confirms that each bundled notice is byte for byte the file in
-the repository.
+the repository. It also hashes the executable as it sits in the signed bundle
+and compares it with `dist/build-info.postsign.txt`, which the build writes
+after signing; a swapped executable that was re-signed under the old manifest
+does not match that record. The in-bundle `Contents/Resources/build-info.txt`
+stays sealed by the signature. The verifier checks that the plist minimum macOS
+version matches the Mach-O load command, and that every text in `LICENSES/` is
+in the bundle.
 
 Pass `--launch` to also run the bundled binary and read a verse out of it:
 

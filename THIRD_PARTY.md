@@ -7,7 +7,10 @@ from, and which licence covers it.
 
 The application bundle copies this file into
 `Bible.app/Contents/Resources/THIRD_PARTY.md`, and the licence texts it names
-travel beside it in the same folder.
+travel beside it in the same folder. `LICENSES/` in the repository and
+`Contents/Resources/LICENSES/` in the bundle hold the actual texts, with
+`INDEX.md` naming the crate, version, declared licence, and file that covers
+each one.
 
 ## The bundled translations
 
@@ -199,11 +202,19 @@ cargo metadata --format-version 1 --locked | python3 -c 'import json,sys,collect
 
 ### What this section does not claim
 
-This section does not reproduce the licence text of every one of the 438
-crates. It reports what each crate declares in its own manifest, which is the
-information a distributor needs to decide whether to ship, and it points at
-the licence file inside each crate for the text. The full text of the MIT
-licence and of the Apache-2.0 licence is in the crates that use them.
+The label table above does not replace the texts. `scripts/collect-licenses.py`
+copies the licence files each crate in the runtime dependency closure actually
+ships into `LICENSES/`, together with the native zstd C library's BSD licence,
+the four fallback-font notices, and this project's own licence and font
+licences. `LICENSES/INDEX.md` records what applies to what. The bundle step
+runs the collector's `--check` first and refuses to build when a required text
+is missing, so a gap is an error rather than a silent omission.
+
+A crate that declares a standard licence but ships no licence file in its
+archive gets the standard text of that licence with a header naming the crate,
+version, and declared licence. The header says the crate shipped no copyright
+notice and does not invent one. A crate whose declared licence has no
+available text stops the collection with a non-zero exit.
 
 ## The bundle's own notices
 
@@ -216,7 +227,9 @@ the binary.
 | `THIRD_PARTY.md` | This file |
 | `OFL-Inter.txt` | The Open Font License for Inter |
 | `OFL-Literata.txt` | The Open Font License for Literata |
-| `build-info.txt` | The digest and size of the binary the bundle was built from |
+| `LICENSES/` | The dependency, native zstd, and fallback-font licence texts, with `INDEX.md` naming what each file covers |
+| `build-info.txt` | The source binary path, digest, derived minimum macOS version, and architectures; sealed by the bundle signature |
+| `dist/build-info.postsign.txt` | The final signed executable digest, size, and codesign CDHash, written beside the bundle rather than inside it |
 
 ## The clean-room rewrite
 
