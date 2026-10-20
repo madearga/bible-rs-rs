@@ -13,15 +13,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use bible_core::{Reference, Translation};
+use bible_core::Reference;
+use bible_core::Translation;
+use bible_core::books;
+use bible_core::search::Corpus;
+use bible_core::study::Store;
 use eframe::egui;
 use egui::{Align, FontId, Pos2, Rect, RichText, Stroke, pos2, vec2};
 
 use crate::Library;
+use crate::book_picker::BookPicker;
+use crate::history::History;
+use crate::palette::{Choice, Palette as JumpPalette};
 use crate::reader::Reader;
+use crate::search_panel::SearchPanel;
 use crate::selection::{self, Selection};
+use crate::shortcuts::{self, Action, Combo, Key as ShortcutKey};
 use crate::theme::{self, Palette, Theme, Typography};
 use crate::typography;
+use crate::verse_menu::{CompareRow, MenuAction, VerseMenu};
 
 /// The reading application.
 ///
@@ -41,6 +51,16 @@ pub struct ReaderApp {
     hovered: Option<Reference>,
     verse_rects: Vec<(Reference, Rect)>,
     status: String,
+    palette: JumpPalette,
+    picker: BookPicker,
+    history: History,
+    search: SearchPanel,
+    menu: VerseMenu,
+    study: Store,
+    corpus: Option<(String, Corpus)>,
+    flash: Option<(Reference, f64)>,
+    overlay: bool,
+    saved_position: Reference,
 }
 
 impl ReaderApp {
@@ -77,18 +97,136 @@ impl ReaderApp {
                 )
             }
         };
+        Self::build(
+            cc,
+            theme,
+            reference,
+            library,
+            translation,
+            status,
+            &crate::data_dir(),
+        )
+    }
+
+    /// Opens the reader with the data folder given, which is how a test keeps
+    /// its study file out of the reader's own.
+    pub fn open_in(
+        cc: &eframe::CreationContext<'_>,
+        theme: Theme,
+        reference: Reference,
+        data: &std::path::Path,
+    ) -> Self {
+        let library = Library::discover_in(data.to_path_buf());
+        let translation = library.load(None).unwrap_or_else(|_| {
+            Arc::new(crate::sample_translation().expect("the sample is valid"))
+        });
+        Self::build(
+            cc,
+            theme,
+            reference,
+            library,
+            translation,
+            String::new(),
+            data,
+        )
+    }
+
+    /// Opens the reader on a given place and ignores the remembered one.
+    ///
+    /// The render harness and the tests use this, so a picture always shows the
+    /// same page and a test never depends on an earlier run.
+    pub fn open_at(
+        cc: &eframe::CreationContext<'_>,
+        theme: Theme,
+        reference: Reference,
+        data: &std::path::Path,
+    ) -> Self {
+        let library = Library::discover_in(data.to_path_buf());
+        let translation = library.load(None).unwrap_or_else(|_| {
+            Arc::new(crate::sample_translation().expect("the sample is valid"))
+        });
+        Self::build(
+            cc,
+            theme,
+            reference,
+            library,
+            translation,
+            String::new(),
+            data,
+        )
+    }
+
+    /// Builds the window on a place with a study store opened on the side.
+    fn build(
+        cc: &eframe::CreationContext<'_>,
+        theme: Theme,
+        reference: Reference,
+        library: Library,
+        translation: Arc<Translation>,
+        status: String,
+        data: &std::path::Path,
+    ) -> Self {
+        theme::install(&cc.egui_ctx, theme);
+        let study = Store::open(data.join("study.db"))
+            .or_else(|_| Store::open_in_memory())
+            .expect("an in-memory study store always opens");
+        // The store remembers where the reader was, so a window opens where the
+        // last one stopped rather than at the first page.
+        let remembered = study.settings().position;
+        let start = if remembered.chapter == 0 {
+            reference
+        } else {
+            remembered
+        };
         Self {
             library,
             translation,
-            reference: reference.chapter_only(),
+            reference: start.chapter_only(),
             theme,
             typography: Typography::default(),
             applied_theme: Some(theme),
-            reader: Reader::new(reference.chapter_only()),
+            reader: Reader::new(start.chapter_only()),
             selection: Selection::new(),
             hovered: None,
             verse_rects: Vec::new(),
             status,
+            palette: JumpPalette::new(),
+            picker: BookPicker::new(),
+            history: History::new(start.chapter_only()),
+            search: SearchPanel::new(),
+            menu: VerseMenu::new(),
+            study,
+            corpus: None,
+            flash: None,
+            overlay: false,
+            saved_position: start.chapter_only(),
+        }
+    }
+
+    /// Puts the window into one of the states the render harness photographs.
+    ///
+    /// This is how a shot reaches a panel without a pointer, and it is the same
+    /// state a reader reaches with the shortcut.
+    pub fn set_view(&mut self, view: ShotView) {
+        match view {
+            ShotView::Palette => {
+                self.palette.open();
+                self.palette.set_input("jn 3:16");
+            }
+            ShotView::Search => {
+                self.search.open();
+                self.search.set_input("light");
+            }
+            ShotView::Picker => self.picker.open_at(self.reference),
+            ShotView::VerseMenu => {
+                // The first verse of the chapter, which is a real verse in the
+                // canonical grid.
+                let target = Reference::new(self.reference.book, self.reference.chapter, Some(1))
+                    .unwrap_or(self.reference.chapter_only());
+                self.selection.select(target);
+                self.menu.open_at(target);
+            }
+            ShotView::Shortcuts => self.overlay = true,
         }
     }
 
@@ -123,6 +261,36 @@ impl ReaderApp {
         self.theme
     }
 
+    /// Whether the jump palette is on screen.
+    pub fn palette_is_open(&self) -> bool {
+        self.palette.is_open()
+    }
+
+    /// The text in the jump palette's input.
+    pub fn palette_input(&self) -> &str {
+        self.palette.input()
+    }
+
+    /// Whether the search panel is on screen.
+    pub fn search_is_open(&self) -> bool {
+        self.search.is_open()
+    }
+
+    /// Whether the book and chapter picker is on screen.
+    pub fn picker_is_open(&self) -> bool {
+        self.picker.is_open()
+    }
+
+    /// Whether the verse menu is on screen.
+    pub fn menu_is_open(&self) -> bool {
+        self.menu.is_open()
+    }
+
+    /// The place the reader was, which the history also holds.
+    pub fn history_current(&self) -> Option<Reference> {
+        self.history.current()
+    }
+
     /// Paints the toolbar, the reading surface, and the status bar.
     fn paint(&mut self, ui: &mut egui::Ui) {
         let palette = self.theme.palette();
@@ -137,6 +305,7 @@ impl ReaderApp {
             .show(ui, |ui| self.paint_chapter(ui, palette));
         let ctx = ui.ctx().clone();
         self.resolve_pointer(&ctx);
+        self.paint_overlays(&ctx, palette);
     }
 
     /// Paints the top bar with the current reference and the theme control.
@@ -169,6 +338,15 @@ impl ReaderApp {
                                 .font(FontId::new(13.0, theme::sans()))
                                 .color(palette.muted),
                         );
+                        if ui.button("Book").clicked() {
+                            self.picker.open_at(self.reference);
+                        }
+                        if ui.button("Search").clicked() {
+                            self.search.open();
+                        }
+                        if ui.button("Jump").clicked() {
+                            self.palette.open();
+                        }
                     });
                 });
             });
@@ -263,6 +441,16 @@ impl ReaderApp {
                 );
 
                 if let Some(reference) = line.verse {
+                    if let Some((flash, until)) = self.flash
+                        && flash == reference
+                        && ui.ctx().input(|input| input.time) < until
+                    {
+                        ui.painter().rect_filled(
+                            line_rect,
+                            2.0,
+                            palette.accent.gamma_multiply(0.28),
+                        );
+                    }
                     if selection.contains(reference) {
                         ui.painter().rect_filled(line_rect, 2.0, palette.selection);
                     }
@@ -296,6 +484,9 @@ impl ReaderApp {
         self.verse_rects = rects;
         self.hovered = hovered;
         self.reference = self.reader.anchor();
+        if self.reference.chapter_only() != self.saved_position {
+            self.remember(self.reference);
+        }
     }
 
     /// Turns a pointer press into a selected verse and the J and K keys into a
@@ -305,6 +496,9 @@ impl ReaderApp {
     /// selects the verse that was under the pointer when it was painted. A press
     /// with shift held extends the selection instead of replacing it.
     fn resolve_pointer(&mut self, ctx: &egui::Context) {
+        if self.palette.is_open() || self.search.is_open() || self.picker.is_open() {
+            return;
+        }
         let press = ctx.input(|input| {
             if input.pointer.primary_clicked() {
                 input
@@ -346,7 +540,477 @@ impl ReaderApp {
                 .unwrap_or(&[]);
             self.selection.step(direction, chapter);
         }
+
+        let secondary = ctx.input(|input| {
+            if input.pointer.secondary_clicked() {
+                input.pointer.interact_pos()
+            } else {
+                None
+            }
+        });
+        if let Some(position) = secondary
+            && let Some((reference, _)) = self
+                .verse_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(position))
+        {
+            self.selection.select(*reference);
+            self.menu.open_at(*reference);
+        }
     }
+
+    /// Moves the reader to a place and records it in the history.
+    ///
+    /// The verse is selected as well, so the study actions that follow a jump
+    /// have a target, and the chapter flashes so the reader can see the landing.
+    fn navigate(&mut self, reference: Reference, now: f64) {
+        self.selection.select(reference);
+        self.reference = reference.chapter_only();
+        self.reader.set_position(reference.chapter_only());
+        self.history.visit(reference.chapter_only());
+        self.flash = Some((reference, now + 0.9));
+        self.remember(reference);
+    }
+
+    /// Shows the place the history moved to without recording a new visit.
+    fn show_place(&mut self, reference: Reference, now: f64) {
+        self.selection.select(reference);
+        self.reference = reference.chapter_only();
+        self.reader.set_position(reference.chapter_only());
+        self.flash = Some((reference, now + 0.9));
+        self.remember(reference);
+    }
+
+    /// Writes the reading position into the study settings, so the next window
+    /// opens where this one stopped.
+    ///
+    /// The store writes the settings at most every 1.5 seconds, so this is cheap
+    /// enough to call on every move.
+    fn remember(&mut self, reference: Reference) {
+        self.saved_position = reference.chapter_only();
+        let mut settings = self.study.settings().clone();
+        settings.position = reference;
+        if let Err(error) = self.study.set_settings(settings) {
+            self.status = format!("cannot save the reading position: {error:#}");
+        }
+    }
+
+    /// The chapter before or after a place, staying inside the canon.
+    fn adjacent_chapter(reference: Reference, forward: bool) -> Option<Reference> {
+        let book = books::book(reference.book)?;
+        if forward {
+            if reference.chapter < book.chapter_count {
+                return Reference::new(book.index, reference.chapter + 1, None).ok();
+            }
+            let next = books::book(book.index + 1)?;
+            Reference::new(next.index, 1, None).ok()
+        } else {
+            if reference.chapter > 1 {
+                return Reference::new(book.index, reference.chapter - 1, None).ok();
+            }
+            let previous = books::book(book.index.checked_sub(1)?)?;
+            Reference::new(previous.index, previous.chapter_count, None).ok()
+        }
+    }
+
+    /// Runs the keyboard shortcuts that are not owned by an open panel.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.palette.is_open() || self.search.is_open() || self.picker.is_open() {
+            return;
+        }
+        let combos: Vec<Combo> = ctx.input(|input| {
+            let mut combos = Vec::new();
+            for event in &input.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                    && let Some(key) = shortcut_key(*key)
+                {
+                    combos.push(Combo::new(
+                        key,
+                        modifiers.command || modifiers.ctrl,
+                        modifiers.shift,
+                        modifiers.alt,
+                    ));
+                }
+            }
+            combos
+        });
+        for combo in combos {
+            if let Some(action) = shortcuts::action_for(combo) {
+                self.perform(action, ctx);
+            }
+        }
+    }
+
+    /// Performs one action from the shortcut table.
+    fn perform(&mut self, action: Action, ctx: &egui::Context) {
+        let now = ctx.input(|input| input.time);
+        match action {
+            Action::JumpPalette => self.palette.open(),
+            Action::Search => self.search.open(),
+            Action::BookPicker => self.picker.open_at(self.reference),
+            Action::Translation(index) => {
+                // The installed translations come first, so the first installed
+                // one is number one. With none installed the bundled list still
+                // gives the shortcut something to ask for.
+                let id = self
+                    .library
+                    .installed()
+                    .get(index as usize)
+                    .map(|installed| installed.meta.id.clone())
+                    .or_else(|| {
+                        crate::BUNDLED_TRANSLATIONS
+                            .get(index as usize)
+                            .map(|translation| translation.id().to_owned())
+                    });
+                match id {
+                    Some(id) => {
+                        if let Err(error) = self.switch_translation(&id) {
+                            self.status = format!("{error:#}");
+                        }
+                    }
+                    None => {
+                        self.status = format!("there is no translation number {}", index + 1);
+                    }
+                }
+            }
+            Action::Back => {
+                if let Some(reference) = self.history.back() {
+                    self.show_place(reference, now);
+                }
+            }
+            Action::Forward => {
+                if let Some(reference) = self.history.forward() {
+                    self.show_place(reference, now);
+                }
+            }
+            Action::PreviousChapter => {
+                if let Some(reference) = Self::adjacent_chapter(self.reference, false) {
+                    self.navigate(reference, now);
+                }
+            }
+            Action::NextChapter => {
+                if let Some(reference) = Self::adjacent_chapter(self.reference, true) {
+                    self.navigate(reference, now);
+                }
+            }
+            Action::Highlight(colour) => self.apply_menu(MenuAction::Highlight(Some(colour)), ctx),
+            Action::ClearHighlight => self.apply_menu(MenuAction::Highlight(None), ctx),
+            Action::Note => {
+                if let Some(target) = self.selection.focus() {
+                    self.menu.open_at(target);
+                    let existing = self.study.note(target).unwrap_or_default().to_owned();
+                    self.menu.set_note_draft(existing);
+                }
+            }
+            Action::Bookmark => self.apply_menu(MenuAction::Bookmark, ctx),
+            Action::Copy => self.apply_menu(MenuAction::Copy, ctx),
+            Action::CopyWithReference => self.apply_menu(MenuAction::CopyWithReference, ctx),
+            Action::Compare => self.compare_selected(),
+            Action::ExportMarkdown => {
+                let path = crate::data_dir().join("study.md");
+                match std::fs::write(&path, self.study.export_markdown()) {
+                    Ok(()) => self.status = format!("exported {}", path.display()),
+                    Err(error) => self.status = format!("cannot write {}: {error}", path.display()),
+                }
+            }
+            Action::ExportJson => {
+                let path = crate::data_dir().join("study.json");
+                let written = self
+                    .study
+                    .export_json()
+                    .and_then(|json| std::fs::write(&path, json).map_err(anyhow::Error::from));
+                match written {
+                    Ok(()) => self.status = format!("exported {}", path.display()),
+                    Err(error) => self.status = format!("cannot write {}: {error}", path.display()),
+                }
+            }
+            Action::ToggleRedLetter => {
+                self.typography.red_letters = !self.typography.red_letters;
+            }
+            Action::CycleTheme => self.theme = self.theme.next(),
+            Action::TextLarger => self.typography.size = (self.typography.size + 1.0).min(32.0),
+            Action::TextSmaller => self.typography.size = (self.typography.size - 1.0).max(12.0),
+            Action::TextDefault => self.typography.size = Typography::default().size,
+        }
+    }
+
+    /// Runs a verse menu action against the study store and reports the result.
+    fn apply_menu(&mut self, action: MenuAction, ctx: &egui::Context) {
+        // The menu is opened on the selection when it is not already open, so a
+        // note the reader is writing survives the action.
+        if self.menu.target().is_none()
+            && let Some(target) = self.selection.focus()
+        {
+            self.menu.open_at(target);
+        }
+        match self.menu.apply(action, &mut self.study, &self.translation) {
+            Ok(outcome) => {
+                self.status = outcome.message;
+                if let Some(text) = outcome.clipboard {
+                    ctx.copy_text(text);
+                }
+            }
+            Err(error) => self.status = format!("{error:#}"),
+        }
+    }
+
+    /// Compares the selected verse across the installed translations.
+    fn compare_selected(&mut self) {
+        let Some(target) = self.selection.focus() else {
+            self.status = "nothing is selected".to_owned();
+            return;
+        };
+        let mut rows = Vec::new();
+        for installed in self.library.installed().iter().take(4) {
+            if let Ok(translation) = self.library.load(Some(installed.meta.id.as_str()))
+                && let Some(text) = translation.reference_text(&target)
+            {
+                rows.push(CompareRow {
+                    abbreviation: installed.meta.abbreviation.clone(),
+                    text: text.to_owned(),
+                });
+            }
+        }
+        self.menu.set_comparison(rows.clone());
+        self.status = if rows.is_empty() {
+            format!("no installed translation has {target}")
+        } else {
+            rows.iter()
+                .map(|row| format!("{}: {}", row.abbreviation, row.text))
+                .collect::<Vec<String>>()
+                .join("  |  ")
+        };
+    }
+
+    /// Rebuilds the normalized corpus when the translation changed.
+    fn rebuild_corpus(&mut self) {
+        let id = self.translation.meta().id.clone();
+        let stale = self.corpus.as_ref().is_none_or(|(cached, _)| *cached != id);
+        if stale {
+            self.corpus = Some((id, Corpus::from_translation(&self.translation)));
+        }
+    }
+
+    /// Paints the palette, the search panel, the picker, and the verse menu.
+    fn paint_overlays(&mut self, ctx: &egui::Context, colours: Palette) {
+        let recent: Vec<Reference> = self.history.entries().rev().collect();
+        let translations: Vec<(String, String)> = self
+            .library
+            .installed()
+            .iter()
+            .map(|installed| {
+                (
+                    installed.meta.id.clone(),
+                    format!("{} ({})", installed.meta.abbreviation, installed.meta.name),
+                )
+            })
+            .collect();
+        if let Some(choice) = self.palette.show(ctx, colours, &recent, &translations) {
+            let now = ctx.input(|input| input.time);
+            match choice {
+                Choice::Jump(reference) => self.navigate(reference, now),
+                Choice::Translation(id) => {
+                    if let Err(error) = self.switch_translation(&id) {
+                        self.status = format!("{error:#}");
+                    }
+                }
+                Choice::Command(action) => self.perform(action, ctx),
+            }
+        }
+
+        if self.search.is_open() {
+            self.rebuild_corpus();
+            let corpus = &self
+                .corpus
+                .as_ref()
+                .expect("the corpus was rebuilt above")
+                .1;
+            let chosen = self.search.show(ctx, colours, corpus, &self.translation);
+            if let Some(reference) = chosen {
+                let now = ctx.input(|input| input.time);
+                self.navigate(reference, now);
+            }
+        }
+
+        if let Some(reference) = self.picker.show(ctx, colours) {
+            let now = ctx.input(|input| input.time);
+            self.navigate(reference, now);
+        }
+
+        self.paint_verse_menu(ctx, colours);
+        self.paint_shortcut_overlay(ctx, colours);
+    }
+
+    /// Paints the verse menu window and applies the row the reader picks.
+    fn paint_verse_menu(&mut self, ctx: &egui::Context, colours: Palette) {
+        if !self.menu.is_open() {
+            return;
+        }
+        let mut open = true;
+        let mut chosen = None;
+        let mut draft = self.menu.note_draft().to_owned();
+        egui::Window::new("Verse")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                if let Some(target) = self.menu.target() {
+                    ui.label(
+                        RichText::new(target.to_string())
+                            .font(FontId::new(13.0, theme::sans()))
+                            .color(colours.ink),
+                    );
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        for colour in bible_core::HighlightColour::ALL {
+                            if ui.button(colour.name()).clicked() {
+                                chosen = Some(MenuAction::Highlight(Some(colour)));
+                            }
+                        }
+                        if ui.button("No colour").clicked() {
+                            chosen = Some(MenuAction::Highlight(None));
+                        }
+                    });
+                    ui.separator();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut draft)
+                            .hint_text("Note")
+                            .desired_rows(3),
+                    );
+                    if ui.button("Save note").clicked() {
+                        chosen = Some(MenuAction::Note);
+                    }
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Bookmark").clicked() {
+                            chosen = Some(MenuAction::Bookmark);
+                        }
+                        if ui.button("Copy").clicked() {
+                            chosen = Some(MenuAction::Copy);
+                        }
+                        if ui.button("Copy with reference").clicked() {
+                            chosen = Some(MenuAction::CopyWithReference);
+                        }
+                        if ui.button("Compare").clicked() {
+                            chosen = Some(MenuAction::Compare);
+                        }
+                    });
+                    let comparison = self.menu.comparison().to_vec();
+                    if !comparison.is_empty() {
+                        ui.separator();
+                        for row in comparison {
+                            ui.label(
+                                RichText::new(row.abbreviation)
+                                    .font(FontId::new(11.0, theme::sans()))
+                                    .color(colours.accent),
+                            );
+                            ui.label(
+                                RichText::new(row.text)
+                                    .font(FontId::new(12.0, theme::body_family()))
+                                    .color(colours.muted),
+                            );
+                        }
+                    }
+                }
+            });
+        self.menu.set_note_draft(draft);
+        if let Some(action) = chosen {
+            self.apply_menu(action, ctx);
+        }
+        if !open {
+            self.menu.close();
+        }
+    }
+
+    /// Paints the keyboard shortcut overlay, which reads the same table the
+    /// key handler reads, so a shortcut cannot be listed and missing.
+    fn paint_shortcut_overlay(&mut self, ctx: &egui::Context, colours: Palette) {
+        if !self.overlay {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Keyboard shortcuts")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(520.0)
+                    .show(ui, |ui| {
+                        for (description, label) in shortcuts::overlay_rows() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(description)
+                                        .font(FontId::new(12.0, theme::sans()))
+                                        .color(colours.accent),
+                                );
+                                ui.label(
+                                    RichText::new(label)
+                                        .font(FontId::new(12.0, theme::sans()))
+                                        .color(colours.muted),
+                                );
+                            });
+                        }
+                    });
+            });
+        self.overlay = open;
+    }
+}
+
+/// Maps a toolkit key to the key the shortcut table records.
+fn shortcut_key(key: egui::Key) -> Option<ShortcutKey> {
+    Some(match key {
+        egui::Key::A => ShortcutKey::Char('a'),
+        egui::Key::B => ShortcutKey::Char('b'),
+        egui::Key::C => ShortcutKey::Char('c'),
+        egui::Key::D => ShortcutKey::Char('d'),
+        egui::Key::E => ShortcutKey::Char('e'),
+        egui::Key::F => ShortcutKey::Char('f'),
+        egui::Key::G => ShortcutKey::Char('g'),
+        egui::Key::H => ShortcutKey::Char('h'),
+        egui::Key::I => ShortcutKey::Char('i'),
+        egui::Key::J => ShortcutKey::Char('j'),
+        egui::Key::K => ShortcutKey::Char('k'),
+        egui::Key::L => ShortcutKey::Char('l'),
+        egui::Key::M => ShortcutKey::Char('m'),
+        egui::Key::N => ShortcutKey::Char('n'),
+        egui::Key::O => ShortcutKey::Char('o'),
+        egui::Key::P => ShortcutKey::Char('p'),
+        egui::Key::Q => ShortcutKey::Char('q'),
+        egui::Key::R => ShortcutKey::Char('r'),
+        egui::Key::S => ShortcutKey::Char('s'),
+        egui::Key::T => ShortcutKey::Char('t'),
+        egui::Key::U => ShortcutKey::Char('u'),
+        egui::Key::V => ShortcutKey::Char('v'),
+        egui::Key::W => ShortcutKey::Char('w'),
+        egui::Key::X => ShortcutKey::Char('x'),
+        egui::Key::Y => ShortcutKey::Char('y'),
+        egui::Key::Z => ShortcutKey::Char('z'),
+        egui::Key::Num0 => ShortcutKey::Char('0'),
+        egui::Key::Num1 => ShortcutKey::Char('1'),
+        egui::Key::Num2 => ShortcutKey::Char('2'),
+        egui::Key::Num3 => ShortcutKey::Char('3'),
+        egui::Key::Num4 => ShortcutKey::Char('4'),
+        egui::Key::Num5 => ShortcutKey::Char('5'),
+        egui::Key::Num6 => ShortcutKey::Char('6'),
+        egui::Key::Num7 => ShortcutKey::Char('7'),
+        egui::Key::Num8 => ShortcutKey::Char('8'),
+        egui::Key::Num9 => ShortcutKey::Char('9'),
+        egui::Key::OpenBracket => ShortcutKey::Char('['),
+        egui::Key::CloseBracket => ShortcutKey::Char(']'),
+        egui::Key::Minus => ShortcutKey::Char('-'),
+        egui::Key::Plus | egui::Key::Equals => ShortcutKey::Char('+'),
+        egui::Key::ArrowLeft => ShortcutKey::Left,
+        egui::Key::ArrowRight => ShortcutKey::Right,
+        _ => return None,
+    })
 }
 
 impl eframe::App for ReaderApp {
@@ -357,7 +1021,41 @@ impl eframe::App for ReaderApp {
             self.theme.apply(&ctx);
             self.applied_theme = Some(self.theme);
         }
+        let ctx = ui.ctx().clone();
+        self.handle_shortcuts(&ctx);
         self.paint(ui);
+    }
+}
+
+/// A panel state the render harness can photograph.
+///
+/// The harness reaches these states the same way the shortcut does, so the
+/// picture proves the wiring rather than a separate paint path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShotView {
+    /// The jump palette, open with a reference typed in.
+    Palette,
+    /// The search panel, open with a query typed in.
+    Search,
+    /// The book and chapter picker.
+    Picker,
+    /// The verse menu on the current selection.
+    VerseMenu,
+    /// The keyboard shortcut overlay.
+    Shortcuts,
+}
+
+impl ShotView {
+    /// Recovers a view from the name the harness environment uses.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "palette" => Some(Self::Palette),
+            "search" => Some(Self::Search),
+            "picker" => Some(Self::Picker),
+            "menu" | "verse-menu" => Some(Self::VerseMenu),
+            "shortcuts" | "overlay" => Some(Self::Shortcuts),
+            _ => None,
+        }
     }
 }
 
@@ -374,6 +1072,8 @@ pub struct ShotSpec {
     pub reference: Reference,
     /// The translation to open, or `None` for the default bundled translation.
     pub translation: Option<String>,
+    /// A panel to open before the picture is taken.
+    pub view: Option<ShotView>,
     /// A point to press, for reaching states that only the pointer reaches.
     pub click: Option<Pos2>,
     /// A point to hover, for the same reason.
@@ -393,6 +1093,7 @@ impl Default for ShotSpec {
             theme: Theme::Light,
             reference: default_reference(),
             translation: None,
+            view: None,
             click: None,
             hover: None,
             pause: Duration::ZERO,
@@ -412,6 +1113,7 @@ impl ShotSpec {
     /// - `SHOT_REFERENCE` is any reference the reader understands.
     /// - `SHOT_TRANSLATION` is a translation id, or `sample` for the synthetic
     ///   page the harness uses as a baseline.
+    /// - `SHOT_DEMO` opens `palette`, `search`, `picker`, `menu`, or `shortcuts`.
     /// - `SHOT_CLICK` and `SHOT_HOVER` are `X,Y` points in points.
     /// - `SHOT_PAUSE` is a wait in milliseconds before the picture.
     /// - `SHOT_FILMSTRIP` is the number of frames to write.
@@ -460,6 +1162,13 @@ impl ShotSpec {
             let frames: u32 = frames.to_string_lossy().parse().context("SHOT_FILMSTRIP")?;
             spec.filmstrip = frames.max(1);
         }
+        if let Some(view) = std::env::var_os("SHOT_DEMO") {
+            let view = view.to_string_lossy();
+            spec.view = Some(
+                ShotView::from_name(&view)
+                    .ok_or_else(|| anyhow!("no shot view called {view:?}"))?,
+            );
+        }
         Ok(spec)
     }
 
@@ -495,12 +1204,18 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
     let theme = spec.theme;
     let reference = spec.reference;
     let translation = spec.translation.clone();
+    let view = spec.view;
     let mut harness = egui_kittest::Harness::builder()
         .with_size(size)
         .with_pixels_per_point(1.0)
         .wgpu()
         .build_eframe(move |cc| {
-            ReaderApp::open_with_translation(cc, theme, reference, translation.as_deref())
+            let mut app =
+                ReaderApp::open_with_translation(cc, theme, reference, translation.as_deref());
+            if let Some(view) = view {
+                app.set_view(view);
+            }
+            app
         });
 
     harness.run();
