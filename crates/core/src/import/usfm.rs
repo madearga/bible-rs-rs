@@ -84,7 +84,7 @@ enum Dest {
 }
 
 /// A marker opened but not yet closed, so its `*` closes the right one.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Opened {
     /// The style to record when this closes, if any.
     style: Option<SpanStyle>,
@@ -96,6 +96,9 @@ struct Opened {
     attributes: bool,
     /// The destination an apparatus run returns to when it closes.
     resume: Dest,
+    /// The name of the marker, so a starred marker only closes the marker that
+    /// opened the style or the apparatus run.
+    name: String,
 }
 
 impl Opened {
@@ -107,6 +110,7 @@ impl Opened {
             skip: false,
             attributes: false,
             resume: Dest::Verse,
+            name: String::new(),
         }
     }
 }
@@ -140,6 +144,8 @@ struct Parser<'d> {
     dest: Dest,
     buffer: String,
     payload: Option<(MarkKind, u8, u16)>,
+    /// Whether the text run after the last opened marker may start with its delimiter space.
+    delimiter: bool,
 }
 
 impl<'d> Parser<'d> {
@@ -157,6 +163,7 @@ impl<'d> Parser<'d> {
             dest: Dest::Verse,
             buffer: String::new(),
             payload: None,
+            delimiter: false,
         }
     }
 
@@ -222,6 +229,7 @@ impl<'d> Parser<'d> {
         } else {
             segment
         };
+        let segment = self.trim_delimiter(segment);
         if segment.is_empty() {
             return Ok(());
         }
@@ -247,6 +255,28 @@ impl<'d> Parser<'d> {
         Ok(())
     }
 
+    /// Drops the one space that separates a marker from its content.
+    ///
+    /// USFM puts a delimiter space after an opening marker, and that space is not
+    /// verse text, so it must not show up when the marker follows a character that
+    /// is not whitespace. A space between two markers is real text and survives
+    /// because a starred close clears the flag.
+    fn trim_delimiter<'s>(&mut self, segment: &'s str) -> &'s str {
+        if !std::mem::take(&mut self.delimiter) {
+            return segment;
+        }
+        let mut characters = segment.char_indices();
+        match (characters.next(), characters.next()) {
+            (Some((_, first)), second)
+                if first.is_whitespace()
+                    && !second.is_some_and(|(_, next)| next.is_whitespace()) =>
+            {
+                &segment[first.len_utf8()..]
+            }
+            _ => segment,
+        }
+    }
+
     /// Applies one marker, which may change the destination, open or close a style,
     /// or attach a structural break.
     fn marker(&mut self, name: &str, starred: bool) -> Result<()> {
@@ -255,9 +285,12 @@ impl<'d> Parser<'d> {
         }
         let name = name.to_ascii_lowercase();
         if starred {
-            self.close_style();
+            self.delimiter = false;
+            self.close_style(&name);
             return Ok(());
         }
+        // An opening marker is followed by a delimiter space that is not content.
+        self.delimiter = true;
 
         match name.as_str() {
             "id" => {
@@ -343,7 +376,7 @@ impl<'d> Parser<'d> {
                     if self.dest == Dest::Skip {
                         self.stack.push(Opened::plain());
                     } else {
-                        self.open_skip();
+                        self.open_skip(&name);
                     }
                 } else if let Some(style) = span_style(&name) {
                     if style == SpanStyle::WordsOfChrist {
@@ -415,27 +448,47 @@ impl<'d> Parser<'d> {
     }
 
     /// Opens an apparatus run, dropping everything until its closing `*`.
-    fn open_skip(&mut self) {
+    fn open_skip(&mut self, name: &str) {
         self.stack.push(Opened {
             skip: true,
             resume: self.dest,
+            name: name.to_owned(),
             ..Opened::plain()
         });
         self.dest = Dest::Skip;
     }
 
     /// Closes the innermost open marker, recording a style when it had one.
-    fn close_style(&mut self) {
+    ///
+    /// An apparatus run is only closed by its own starred marker: a nested custom
+    /// marker such as `\+wh*` inside a footnote leaves the run open, so the rest of
+    /// the note stays out of the verse.
+    fn close_style(&mut self, name: &str) {
         let dest = self.dest;
         if dest == Dest::Skip {
-            // The markers inside a note are not closed one by one, so a close marker
-            // in apparatus ends the run that started it.
+            // The markers inside a note are not closed one by one, so only the
+            // marker that started the run ends it.
+            let closes = self
+                .stack
+                .iter()
+                .rev()
+                .find(|opened| opened.skip)
+                .is_some_and(|opened| opened.name == name);
+            if !closes {
+                return;
+            }
             while let Some(opened) = self.stack.pop() {
                 if opened.skip {
                     self.dest = opened.resume;
                     break;
                 }
             }
+            return;
+        }
+        let Some(opened) = self.stack.last() else {
+            return;
+        };
+        if opened.skip && opened.name != name {
             return;
         }
         let Some(opened) = self.stack.pop() else {
