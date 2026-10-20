@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 madearga
+
+[package]
+name = "bible-app"
+description = "The reader window, the themes, the offscreen render harness, and the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bible"
+path = "src/main.rs"
+
+[dependencies]
+bible-core = { path = "../core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.36", features = [
+    "default_fonts",
+    "glow",
+    "wgpu",
+    "wayland",
+    "x11",
+    "accesskit",
+] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
+
+[lints.rust]
+unsafe_code = "forbid"
