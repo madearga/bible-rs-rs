@@ -10,3 +10,4 @@
 pub mod books;
 pub mod format;
 pub mod model;
+pub mod reference;
