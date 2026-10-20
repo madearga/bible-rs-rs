@@ -63,3 +63,22 @@ Reply with these lines.
 - The PR number and its URL, opened against main.
 - What the fix changed, in three sentences at most.
 - The verify output.
+
+## Bug 2, added after dispatch
+
+A marker's delimiter space leaks into the verse when the marker opens directly after
+non-whitespace. Darby Revelation 22:21 raw text is
+
+    ...Christ|strong="G2962"\w* [\w be|strong="G3956"\w*] \w with...
+
+The single space after `\w` is the marker delimiter, not content, but the accumulator keeps it,
+so the verse reads `[ be]` instead of `[be]`. The same delimiter space is harmless where real
+whitespace already precedes the marker.
+
+The rule: when a marker opens, which is not a starred close, and the next text run starts with
+exactly one whitespace character, drop that one character. A segment between two markers keeps
+its real space, so `\w* \w the` still reads correctly.
+
+ACCEPTANCE for bug 2: a regression test feeds the Darby marker shape above through the importer
+and asserts the verse text contains `[be]` and not `[ be]`, and a second case asserts a real
+space between two markers survives. Everything else in this brief is unchanged.
