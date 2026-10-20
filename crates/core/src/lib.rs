@@ -7,6 +7,8 @@
 //! The importers, the search, and the reader all sit on this crate; none of it
 //! depends on a GUI.
 
+#![warn(missing_docs)]
+
 pub mod books;
 pub mod format;
 pub mod model;
