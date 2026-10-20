@@ -226,10 +226,10 @@ fn study_data_exports_and_imports_round_trip() {
 }
 
 #[test]
-fn a_reference_without_a_translation_still_reads_the_sample() {
-    let dir = scratch("sample");
+fn a_reference_without_a_translation_reads_the_bundled_default() {
+    let dir = scratch("default");
     let reference = Reference::new(0, 1, Some(1)).expect("Genesis 1:1 is canonical");
     let output = run(&dir, &["read", &reference.to_string()]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("SAMPLE"), "{}", stdout(&output));
+    assert!(stdout(&output).contains("(KJV)"), "{}", stdout(&output));
 }

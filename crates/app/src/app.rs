@@ -9,6 +9,7 @@
 //! change to this file is verified on a machine with no display.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -30,7 +31,7 @@ use crate::typography;
 /// without laying the chapter out twice.
 pub struct ReaderApp {
     library: Library,
-    translation: Translation,
+    translation: Arc<Translation>,
     reference: Reference,
     theme: Theme,
     typography: Typography,
@@ -45,18 +46,35 @@ pub struct ReaderApp {
 impl ReaderApp {
     /// Opens the reader at a reference with a theme already chosen.
     ///
-    /// This is the constructor the window and the harness share. The first
-    /// installed translation is used, and with none installed the embedded
-    /// sample is used, so the first frame always has a page to paint.
+    /// This is the constructor the window and the harness share. The default
+    /// bundled translation is used, so the first frame paints scripture even on
+    /// a machine that has never installed anything.
     pub fn open(cc: &eframe::CreationContext<'_>, theme: Theme, reference: Reference) -> Self {
+        Self::open_with_translation(cc, theme, reference, None)
+    }
+
+    /// Opens the reader with a named translation rather than the default.
+    ///
+    /// The identifier may be one of the bundled translations, one installed in
+    /// the data folder, or [`crate::SAMPLE_TRANSLATION_ID`] for the synthetic
+    /// page. The harness uses the named form so it can shoot the same reference
+    /// in real text and in the sample and compare them.
+    pub fn open_with_translation(
+        cc: &eframe::CreationContext<'_>,
+        theme: Theme,
+        reference: Reference,
+        translation: Option<&str>,
+    ) -> Self {
         theme::install(&cc.egui_ctx, theme);
         let library = Library::discover();
         let mut status = String::new();
-        let translation = match library.load(None) {
+        let translation = match library.load(translation) {
             Ok(translation) => translation,
             Err(error) => {
                 status = format!("{error:#}");
-                crate::sample_translation().expect("the embedded sample translation is valid")
+                Arc::new(
+                    crate::sample_translation().expect("the embedded sample translation is valid"),
+                )
             }
         };
         Self {
@@ -74,6 +92,16 @@ impl ReaderApp {
         }
     }
 
+    /// Switches the page to another translation, keeping the reading position.
+    ///
+    /// The first switch to a translation decodes it, and a later switch back to
+    /// one already read is served from the library's cache.
+    pub fn switch_translation(&mut self, id: &str) -> Result<()> {
+        self.translation = self.library.load(Some(id))?;
+        self.status.clear();
+        Ok(())
+    }
+
     /// The library this reader reads installed translations from, which a
     /// translation menu switches between.
     pub fn library(&self) -> &Library {
@@ -82,7 +110,7 @@ impl ReaderApp {
 
     /// The translation currently on screen.
     pub fn translation(&self) -> &Translation {
-        &self.translation
+        self.translation.as_ref()
     }
 
     /// The chapter the reader is showing.
@@ -203,7 +231,7 @@ impl ReaderApp {
         let measure = typography::EguiMeasure::new(&ctx, ty);
         let frame = self
             .reader
-            .frame(&self.translation, &ty, width, viewport, &measure);
+            .frame(self.translation.as_ref(), &ty, width, viewport, &measure);
         let selection = self.selection;
 
         let (rect, _) =
@@ -344,6 +372,8 @@ pub struct ShotSpec {
     pub theme: Theme,
     /// The chapter to open.
     pub reference: Reference,
+    /// The translation to open, or `None` for the default bundled translation.
+    pub translation: Option<String>,
     /// A point to press, for reaching states that only the pointer reaches.
     pub click: Option<Pos2>,
     /// A point to hover, for the same reason.
@@ -362,6 +392,7 @@ impl Default for ShotSpec {
             size: [1280, 800],
             theme: Theme::Light,
             reference: default_reference(),
+            translation: None,
             click: None,
             hover: None,
             pause: Duration::ZERO,
@@ -379,6 +410,8 @@ impl ShotSpec {
     ///
     /// - `SHOT_THEME` is `light`, `sepia`, or `dark`.
     /// - `SHOT_REFERENCE` is any reference the reader understands.
+    /// - `SHOT_TRANSLATION` is a translation id, or `sample` for the synthetic
+    ///   page the harness uses as a baseline.
     /// - `SHOT_CLICK` and `SHOT_HOVER` are `X,Y` points in points.
     /// - `SHOT_PAUSE` is a wait in milliseconds before the picture.
     /// - `SHOT_FILMSTRIP` is the number of frames to write.
@@ -409,6 +442,9 @@ impl ShotSpec {
             let reference = reference.to_string_lossy();
             spec.reference = Reference::parse(&reference)
                 .with_context(|| format!("cannot read the reference {reference:?}"))?;
+        }
+        if let Some(translation) = std::env::var_os("SHOT_TRANSLATION") {
+            spec.translation = Some(translation.to_string_lossy().into_owned());
         }
         if let Some(point) = std::env::var_os("SHOT_CLICK") {
             spec.click = Some(parse_point(&point.to_string_lossy())?);
@@ -458,11 +494,14 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
     let size = vec2(spec.size[0] as f32, spec.size[1] as f32);
     let theme = spec.theme;
     let reference = spec.reference;
+    let translation = spec.translation.clone();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(size)
         .with_pixels_per_point(1.0)
         .wgpu()
-        .build_eframe(move |cc| ReaderApp::open(cc, theme, reference));
+        .build_eframe(move |cc| {
+            ReaderApp::open_with_translation(cc, theme, reference, translation.as_deref())
+        });
 
     harness.run();
 
