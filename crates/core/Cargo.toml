@@ -1,0 +1,17 @@
+[package]
+name = "bible-core"
+description = "Translation model, canonical grid, and binary format for the Bible reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+memchr = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.13"
+
+[lints]
+workspace = true
