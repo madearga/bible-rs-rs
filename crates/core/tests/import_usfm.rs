@@ -204,6 +204,106 @@ fn a_footnote_and_a_cross_reference_are_not_shown() {
     assert_eq!(verse_text(&translation, 0, 1, 1), "Alpha beta gamma.");
 }
 
+#[test]
+fn a_nested_custom_marker_in_a_footnote_does_not_end_the_note() {
+    // The marker sequence is the World English Bible's Genesis 1:1 footnote, kept
+    // verbatim because it is the shape that used to break the importer.
+    const NESTED: &str = r#"\id GEN
+\c 1
+\v 1 Alpha\f + \fr 1:1 \ft The Hebrew word rendered "God" is "\+wh אֱלֹהִ֑ים\+wh*" (Elohim).\f* omega.
+"#;
+    let meta = TranslationMeta::new("synthetic", "Synthetic");
+    let translation = import_usfm(&[NESTED], meta).expect("the fixture imports");
+
+    assert_eq!(verse_text(&translation, 0, 1, 1), "Alpha omega.");
+    assert!(
+        spans(&translation, 0, 1, 1).is_empty(),
+        "a style from inside the footnote reached the verse"
+    );
+}
+
+#[test]
+fn a_nested_custom_marker_in_a_cross_reference_does_not_end_the_note() {
+    const NESTED: &str = r"\id GEN
+\c 1
+\v 1 Alpha\x - \xo 1:2 \xt see \+nd the word\+nd* elsewhere\x* omega.
+";
+    let meta = TranslationMeta::new("synthetic", "Synthetic");
+    let translation = import_usfm(&[NESTED], meta).expect("the fixture imports");
+
+    assert_eq!(verse_text(&translation, 0, 1, 1), "Alpha omega.");
+    assert!(
+        spans(&translation, 0, 1, 1).is_empty(),
+        "a style from inside the cross reference reached the verse"
+    );
+}
+
+#[test]
+fn a_plain_footnote_still_ends_at_its_own_star() {
+    const PLAIN: &str = r"\id GEN
+\c 1
+\v 1 Alpha\f + \fr 1:1 \ft a note nobody sees\f* omega.
+";
+    let meta = TranslationMeta::new("synthetic", "Synthetic");
+    let translation = import_usfm(&[PLAIN], meta).expect("the fixture imports");
+
+    assert_eq!(verse_text(&translation, 0, 1, 1), "Alpha omega.");
+}
+
+#[test]
+fn a_styled_range_outside_apparatus_still_closes() {
+    const STYLED: &str = r"\id GEN
+\c 1
+\v 1 Alpha \add added words\add* omega.
+";
+    let meta = TranslationMeta::new("synthetic", "Synthetic");
+    let translation = import_usfm(&[STYLED], meta).expect("the fixture imports");
+
+    assert_eq!(
+        verse_text(&translation, 0, 1, 1),
+        "Alpha added words omega."
+    );
+    assert_eq!(
+        spans(&translation, 0, 1, 1),
+        vec!["TranslatorAddition:added words".to_owned()]
+    );
+}
+
+#[test]
+fn a_marker_delimiter_space_does_not_reach_the_verse() {
+    // The Darby shape: a word marker opens directly after a bracket, so its
+    // delimiter space must not become verse text.
+    const DARBY: &str = r#"\id REV
+\c 22
+\v 21 Alpha[\w be|strong="G3956"\w*] \w with|strong="G3326"\w* omega.
+"#;
+    let meta = TranslationMeta::new("synthetic", "Synthetic");
+    let translation = import_usfm(&[DARBY], meta).expect("the fixture imports");
+
+    let text = verse_text(&translation, 65, 22, 21);
+    assert!(
+        text.contains("[be]"),
+        "the delimiter space leaked: {text:?}"
+    );
+    assert!(
+        !text.contains("[ be]"),
+        "the delimiter space leaked: {text:?}"
+    );
+    assert_eq!(text, "Alpha[be] with omega.");
+}
+
+#[test]
+fn a_real_space_between_two_markers_survives() {
+    const SPACED: &str = r#"\id GEN
+\c 1
+\v 1 Alpha \w one|strong="G1520"\w* \w the|strong="G3588"\w* omega.
+"#;
+    let meta = TranslationMeta::new("synthetic", "Synthetic");
+    let translation = import_usfm(&[SPACED], meta).expect("the fixture imports");
+
+    assert_eq!(verse_text(&translation, 0, 1, 1), "Alpha one the omega.");
+}
+
 /// A folder under the system temp folder, removed again when the test ends.
 struct Scratch {
     /// The folder itself.

@@ -21,7 +21,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod app;
 pub mod cli;
+pub mod reader;
+pub mod selection;
 pub mod theme;
+pub mod typography;
+
+#[cfg(test)]
+mod reader_tests;
 
 pub use app::ReaderApp;
 
