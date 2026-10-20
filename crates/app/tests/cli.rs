@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use bible_core::study::{Bookmark, HighlightColour, Store, Theme};
 use bible_core::{Reference, Translation, TranslationBuilder, TranslationMeta, books, format};
 
 /// The binary under test, built by cargo before the tests run.
@@ -182,22 +183,67 @@ fn import_converts_a_text_file_and_installs_it() {
     assert!(stdout(&read).contains("synthetic witness words from a file"));
 }
 
-#[test]
-fn study_data_exports_and_imports_round_trip() {
-    let dir = scratch("study");
-    let source = dir.join("study-in.json");
-    std::fs::write(
-        &source,
-        r#"{
-            "highlights": [{"reference": "John 3:16", "colour": 2}],
-            "notes": [{"reference": "John 3:16", "body": "a generated note"}],
-            "bookmarks": [{"reference": "Genesis 1:1", "label": "start"}]
-        }"#,
-    )
-    .expect("write the study file");
+/// The study export document the core store writes and reads, as a literal.
+///
+/// John 3:16 carries a blue highlight and a note; Genesis 1:1 carries a
+/// labelled bookmark. Every field is explicit so the test fails if the CLI
+/// silently falls back to a different schema.
+fn study_export_literal() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "settings": {
+            "position": {"book": 0, "chapter": 1, "verse": 1},
+            "theme": "light",
+            "text_size": 17.0,
+            "line_spacing": 1.62,
+            "line_length": 34.0,
+            "justify": false,
+            "show_verse_numbers": true,
+            "show_headings": true,
+            "words_of_christ_red": true
+        },
+        "highlights": [
+            {"reference": {"book": 42, "chapter": 3, "verse": 16}, "colour": "blue"}
+        ],
+        "notes": [
+            {"reference": {"book": 42, "chapter": 3, "verse": 16}, "body": "a generated note"}
+        ],
+        "bookmarks": [
+            {"reference": {"book": 0, "chapter": 1, "verse": 1}, "label": "start"}
+        ]
+    })
+}
 
-    let imported = run(&dir, &["import-study", source.to_str().expect("a path")]);
-    assert!(imported.status.success(), "{}", stderr(&imported));
+/// Seeds the same study database the GUI opens, then closes it.
+fn seed_study(dir: &Path) {
+    let mut store = Store::open(dir.join("study.db")).expect("open the study store");
+    store
+        .set_highlight(
+            Reference::new(42, 3, Some(16)).unwrap(),
+            Some(HighlightColour::Blue),
+        )
+        .expect("set a highlight");
+    store
+        .set_note(Reference::new(42, 3, Some(16)).unwrap(), "a generated note")
+        .expect("set a note");
+    store
+        .set_bookmark(
+            Reference::new(0, 1, Some(1)).unwrap(),
+            Some(Bookmark::with_label("start")),
+        )
+        .expect("set a bookmark");
+    let mut settings = store.settings().clone();
+    settings.position = Reference::new(18, 23, Some(1)).unwrap();
+    settings.theme = Theme::Sepia;
+    settings.text_size = 19.5;
+    store.set_settings(settings).expect("set study settings");
+    store.close().expect("close the study store");
+}
+
+#[test]
+fn study_export_reads_the_gui_store_as_json_and_markdown() {
+    let dir = scratch("study-export");
+    seed_study(&dir);
 
     let json = dir.join("out.json");
     let exported = run(
@@ -205,9 +251,14 @@ fn study_data_exports_and_imports_round_trip() {
         &["export", json.to_str().expect("a path"), "--format", "json"],
     );
     assert!(exported.status.success(), "{}", stderr(&exported));
+
     let text = std::fs::read_to_string(&json).expect("the export was written");
-    assert!(text.contains("John 3:16"), "{text}");
-    assert!(text.contains("a generated note"), "{text}");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("the export is JSON");
+    let mut expected = study_export_literal();
+    expected["settings"]["position"] = serde_json::json!({"book": 18, "chapter": 23, "verse": 1});
+    expected["settings"]["theme"] = serde_json::json!("sepia");
+    expected["settings"]["text_size"] = serde_json::json!(19.5);
+    assert_eq!(document, expected, "{text}");
 
     let markdown = dir.join("out.md");
     let exported = run(
@@ -222,7 +273,180 @@ fn study_data_exports_and_imports_round_trip() {
     assert!(exported.status.success(), "{}", stderr(&exported));
     let text = std::fs::read_to_string(&markdown).expect("the export was written");
     assert!(text.contains("## Highlights"), "{text}");
+    assert!(text.contains("John 3:16, blue"), "{text}");
+    assert!(text.contains("### John 3:16"), "{text}");
     assert!(text.contains("a generated note"), "{text}");
+    assert!(text.contains("Genesis 1:1 (start)"), "{text}");
+}
+
+#[test]
+fn study_import_writes_the_gui_store() {
+    let dir = scratch("study-import");
+    let source = dir.join("study-in.json");
+    let mut document = study_export_literal();
+    document["highlights"][0]["colour"] = serde_json::json!("green");
+    document["notes"][0]["body"] = serde_json::json!("an imported note");
+    document["bookmarks"][0]["label"] = serde_json::json!(null);
+    std::fs::write(&source, serde_json::to_vec_pretty(&document).unwrap())
+        .expect("write the study file");
+
+    let imported = run(&dir, &["import-study", source.to_str().expect("a path")]);
+    assert!(imported.status.success(), "{}", stderr(&imported));
+
+    let store = Store::open(dir.join("study.db")).expect("reopen the study store");
+    let john = Reference::new(42, 3, Some(16)).unwrap();
+    let genesis = Reference::new(0, 1, Some(1)).unwrap();
+    assert_eq!(store.highlight(john), Some(HighlightColour::Green));
+    assert_eq!(store.note(john), Some("an imported note"));
+    assert_eq!(store.bookmark(genesis), Some(&Bookmark::unlabelled()));
+    assert_eq!(store.settings().theme, Theme::Light);
+    assert_eq!(
+        store.settings().position,
+        Reference::new(0, 1, Some(1)).unwrap()
+    );
+    store.close().expect("close the study store");
+}
+
+#[test]
+fn a_malformed_study_import_fails_and_preserves_the_store() {
+    let dir = scratch("study-import-bad");
+    seed_study(&dir);
+
+    let source = dir.join("bad.json");
+    std::fs::write(&source, "{\"version\": 1, \"settings\":").expect("write a broken file");
+    let imported = run(&dir, &["import-study", source.to_str().expect("a path")]);
+    assert_eq!(imported.status.code(), Some(1), "{}", stderr(&imported));
+
+    let wrong_version = dir.join("wrong-version.json");
+    std::fs::write(&wrong_version, r#"{"version": 99}"#).expect("write a future file");
+    let imported = run(
+        &dir,
+        &["import-study", wrong_version.to_str().expect("a path")],
+    );
+    assert_eq!(imported.status.code(), Some(1), "{}", stderr(&imported));
+
+    let store = Store::open(dir.join("study.db")).expect("reopen the study store");
+    let john = Reference::new(42, 3, Some(16)).unwrap();
+    let genesis = Reference::new(0, 1, Some(1)).unwrap();
+    assert_eq!(store.highlight(john), Some(HighlightColour::Blue));
+    assert_eq!(store.note(john), Some("a generated note"));
+    assert_eq!(
+        store.bookmark(genesis),
+        Some(&Bookmark::with_label("start"))
+    );
+    store.close().expect("close the study store");
+}
+
+#[test]
+fn export_refuses_to_overwrite_the_live_study_database() {
+    let dir = scratch("study-export-guard");
+    seed_study(&dir);
+
+    let live = dir.join("study.db");
+    let exported = run(&dir, &["export", live.to_str().expect("a path")]);
+    assert_eq!(exported.status.code(), Some(1), "{}", stderr(&exported));
+    assert!(
+        stderr(&exported).contains("live study database"),
+        "{}",
+        stderr(&exported)
+    );
+
+    let store = Store::open(&live).expect("the live store still opens");
+    assert_eq!(
+        store.note(Reference::new(42, 3, Some(16)).unwrap()),
+        Some("a generated note")
+    );
+    store.close().expect("close the study store");
+}
+
+#[test]
+fn study_cli_rejects_access_while_another_store_is_open() {
+    let dir = scratch("study-busy");
+    let store = Store::open(dir.join("study.db")).expect("open GUI-like store");
+
+    let output = run(&dir, &["export", dir.join("out.json").to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("busy"), "{}", stderr(&output));
+
+    let source = dir.join("study-in.json");
+    std::fs::write(
+        &source,
+        serde_json::to_vec_pretty(&study_export_literal()).unwrap(),
+    )
+    .expect("write the study file");
+    let output = run(&dir, &["import-study", source.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("busy"), "{}", stderr(&output));
+    assert_eq!(
+        store.note(Reference::new(42, 3, Some(16)).unwrap()),
+        None,
+        "the refused import did not touch the open store"
+    );
+
+    store.close().expect("close GUI-like store");
+}
+
+#[cfg(unix)]
+#[test]
+fn export_rejects_database_and_side_file_aliases_without_corruption() {
+    use std::os::unix::fs::symlink;
+
+    let dir = scratch("study-export-aliases");
+    seed_study(&dir);
+    let database = dir.join("study.db");
+
+    for suffix in ["-wal", "-shm"] {
+        let side = PathBuf::from(format!("{}{suffix}", database.display()));
+        std::fs::write(&side, format!("owned {suffix} sentinel")).expect("create side file");
+        let alias = dir.join(format!("alias{suffix}"));
+        std::fs::hard_link(&side, &alias).expect("hard-link side file");
+        let before = std::fs::read(&side).unwrap();
+        let output = run(&dir, &["export", alias.to_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert_eq!(std::fs::read(&side).unwrap(), before);
+    }
+
+    let lock = PathBuf::from(format!("{}.lock", database.display()));
+    std::fs::hard_link(&lock, dir.join("alias.lock")).expect("hard-link lock file");
+    let before = std::fs::read(&lock).unwrap();
+    let output = run(&dir, &["export", dir.join("alias.lock").to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(std::fs::read(&lock).unwrap(), before);
+
+    let hardlink = dir.join("hardlink.db");
+    std::fs::hard_link(&database, &hardlink).expect("hard-link database");
+    let output = run(&dir, &["export", hardlink.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+
+    let link = dir.join("symlink.db");
+    symlink(&database, &link).expect("symlink database");
+    let output = run(&dir, &["export", link.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+
+    let store = Store::open(&database).expect("database remains readable");
+    assert_eq!(
+        store.note(Reference::new(42, 3, Some(16)).unwrap()),
+        Some("a generated note")
+    );
+    store.close().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn export_rejects_a_dangling_symlink_to_the_database() {
+    use std::os::unix::fs::symlink;
+
+    let dir = scratch("study-export-dangling");
+    let database = dir.join("study.db");
+    let alias = dir.join("dangling.db");
+    symlink(&database, &alias).expect("create dangling database symlink");
+
+    let output = run(&dir, &["export", alias.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    Store::open(&database)
+        .expect("database was not replaced")
+        .close()
+        .unwrap();
 }
 
 #[test]

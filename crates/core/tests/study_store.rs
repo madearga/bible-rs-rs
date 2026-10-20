@@ -58,6 +58,20 @@ fn other_verse() -> Reference {
 }
 
 #[test]
+fn a_file_backed_store_has_one_writer_for_its_lifetime() {
+    let db = TempDb::new("lifetime-lock");
+    let first = Store::open(db.path()).expect("the first store opens");
+
+    let error = Store::open(db.path())
+        .err()
+        .expect("a second store is rejected while the first is alive");
+    assert!(error.to_string().contains("busy"), "{error:#}");
+
+    first.close().expect("the first store closes");
+    Store::open(db.path()).expect("the lock is released on close");
+}
+
+#[test]
 fn store_opens_in_wal_mode() {
     let db = TempDb::new("wal");
     let store = Store::open(db.path()).expect("the store opens");

@@ -9,14 +9,18 @@
 //! exit code without a window.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use bible_core::format::{self, MAGIC};
+use bible_core::study::Store;
 use bible_core::{Reference, Translation, TranslationBuilder, TranslationMeta, books};
 
-use crate::{BUNDLED_TRANSLATIONS, Library, StudyData, data_dir};
+use crate::{BUNDLED_TRANSLATIONS, Library, data_dir};
 
 /// What to print when a caller asks for help or names a verb the app does not
 /// have.
@@ -321,30 +325,49 @@ fn parse_text(source: &str, id: &str, path: &Path) -> Result<Translation> {
     builder.finish()
 }
 
-/// Writes the study data out as JSON or Markdown.
+/// Writes the study data out as JSON or Markdown from the same SQLite store the
+/// window opens, so an export always sees the reader's live study data.
 fn export(positional: &[String], flags: &BTreeMap<String, String>) -> Result<()> {
     let Some(path) = positional.first() else {
         return Err(UsageError("export needs an output path".to_owned()).into());
     };
     let format = flags.get("format").map(String::as_str).unwrap_or("json");
-    let study = StudyData::load(&data_dir().join("study.json"))?;
-    let path = PathBuf::from(path);
-    match format {
-        "json" => study.save(&path)?,
-        "markdown" | "md" => {
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("cannot create {}", parent.display()))?;
-            }
-            fs::write(&path, study.to_markdown())
-                .with_context(|| format!("cannot write {}", path.display()))?;
-        }
-        other => {
-            return Err(UsageError(format!("no export format called {other:?}")).into());
-        }
+    if !matches!(format, "json" | "markdown" | "md") {
+        return Err(UsageError(format!("no export format called {format:?}")).into());
     }
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    if is_live_database(&path) {
+        bail!(
+            "refusing to overwrite the live study database at {}",
+            path.display()
+        );
+    }
+
+    let data_dir = data_dir();
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("cannot create {}", data_dir.display()))?;
+    let store = Store::open(data_dir.join("study.db"))?;
+    // Opening the store can create the database, the WAL, and the lock file.
+    // A link that was dangling before that point is an alias only now.
+    if is_live_database(&path) {
+        store.close()?;
+        bail!(
+            "refusing to overwrite the live study database at {}",
+            path.display()
+        );
+    }
+    let study = store.snapshot();
+    match format {
+        "json" => write_export(&path, &store.export_json()?)?,
+        _ => write_export(&path, &store.export_markdown())?,
+    }
+    store.close()?;
     println!(
         "exported {} highlights, {} notes, {} bookmarks to {}",
         study.highlights.len(),
@@ -355,15 +378,25 @@ fn export(positional: &[String], flags: &BTreeMap<String, String>) -> Result<()>
     Ok(())
 }
 
-/// Reads exported study data back into the data folder.
+/// Reads exported study data back into the same SQLite store the window opens.
+///
+/// The core store parses and checks the whole document before it runs the one
+/// transaction that replaces the records, so a malformed file fails without
+/// touching what is already there.
 fn import_study(positional: &[String]) -> Result<()> {
     let Some(path) = positional.first() else {
         return Err(UsageError("import-study needs a file path".to_owned()).into());
     };
     let path = PathBuf::from(path);
-    let study = StudyData::load(&path)?;
-    let target = data_dir().join("study.json");
-    study.save(&target)?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let data_dir = data_dir();
+    fs::create_dir_all(&data_dir)
+        .with_context(|| format!("cannot create {}", data_dir.display()))?;
+    let mut store = Store::open(data_dir.join("study.db"))?;
+    store.import_json(&text)?;
+    let study = store.snapshot();
+    store.close()?;
     println!(
         "imported {} highlights, {} notes, {} bookmarks from {}",
         study.highlights.len(),
@@ -372,4 +405,119 @@ fn import_study(positional: &[String]) -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+/// Whether `path` names the GUI's live study database, or one of the SQLite
+/// side files that sit beside it.
+fn is_live_database(path: &Path) -> bool {
+    live_store_files().iter().any(|live| same_file(path, live))
+}
+
+/// The database, its SQLite side files, and its lifetime lock.
+fn live_store_files() -> Vec<PathBuf> {
+    let database = data_dir().join("study.db");
+    let mut files = vec![database];
+    for suffix in ["-wal", "-shm", ".lock"] {
+        let mut name = files[0].as_os_str().to_owned();
+        name.push(suffix);
+        files.push(PathBuf::from(name));
+    }
+    files
+}
+
+/// Whether two paths name the same file, following symlinks (including a
+/// dangling link to a file that does not exist yet) and hard links.
+fn same_file(left: &Path, right: &Path) -> bool {
+    if let (Some(left), Some(right)) = (resolve(left), resolve(right))
+        && left == right
+    {
+        return true;
+    }
+    same_existing_file(left, right)
+}
+
+/// Compares the identity of two existing files, which is how a hard link is
+/// recognised as an alias.
+#[cfg(unix)]
+fn same_existing_file(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let identity = |path: &Path| fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()));
+    matches!(
+        (identity(left), identity(right)),
+        (Some(left), Some(right)) if left == right
+    )
+}
+
+#[cfg(not(unix))]
+fn same_existing_file(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+/// Resolves a path against the current folder and follows every symlink even
+/// when the final target does not exist yet, so two spellings of one path
+/// compare equal.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    for _ in 0..64 {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&current).ok()?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    current.parent()?.join(target)
+                };
+            }
+            Ok(_) => return fs::canonicalize(&current).ok().or(Some(current)),
+            Err(_) => {
+                let parent = current.parent()?;
+                let name = current.file_name()?;
+                return Some(fs::canonicalize(parent).ok()?.join(name));
+            }
+        }
+    }
+    None
+}
+
+/// Writes an export through a new file of our own and renames it into place, so
+/// an existing alias can never be truncated by the write.
+fn write_export(path: &Path, contents: &str) -> Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?;
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".tmp-{}-{unique}", std::process::id()));
+    let temporary = parent.join(temporary_name);
+
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("cannot create {}", temporary.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("cannot write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("cannot flush {}", temporary.display()))?;
+        drop(file);
+        fs::rename(&temporary, path).with_context(|| format!("cannot write {}", path.display()))
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
