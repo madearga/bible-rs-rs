@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/app", "crates/core"]
+members = ["crates/app", "crates/core", "xtask"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 madearga
+
+[package]
+name = "xtask"
+description = "The build tasks for the Bible reader, including the bundled data build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+bible-core = { path = "../crates/core" }
+sha2.workspace = true
+zstd.workspace = true
