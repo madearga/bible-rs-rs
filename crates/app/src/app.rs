@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use bible_core::{MarkKind, Reference, SpanStyle, Translation, Verse, books};
+use bible_core::{Reference, Translation};
 use eframe::egui;
-use egui::epaint::text::VariationCoords;
-use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, FontId, Pos2, Rect, RichText, Stroke, pos2, vec2};
 
 use crate::Library;
+use crate::reader::Reader;
+use crate::selection::{self, Selection};
 use crate::theme::{self, Palette, Theme, Typography};
+use crate::typography;
 
 /// The reading application.
 ///
@@ -34,7 +35,8 @@ pub struct ReaderApp {
     theme: Theme,
     typography: Typography,
     applied_theme: Option<Theme>,
-    selected: Option<Reference>,
+    reader: Reader,
+    selection: Selection,
     hovered: Option<Reference>,
     verse_rects: Vec<(Reference, Rect)>,
     status: String,
@@ -64,7 +66,8 @@ impl ReaderApp {
             theme,
             typography: Typography::default(),
             applied_theme: Some(theme),
-            selected: None,
+            reader: Reader::new(reference.chapter_only()),
+            selection: Selection::new(),
             hovered: None,
             verse_rects: Vec::new(),
             status,
@@ -101,20 +104,9 @@ impl ReaderApp {
             .frame(egui::Frame::NONE.fill(palette.paper).inner_margin(8))
             .show(ui, |ui| self.paint_status(ui, palette));
 
-        let chapter = {
-            let this = &*self;
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(palette.paper))
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| this.paint_chapter(ui, palette))
-                        .inner
-                })
-                .inner
-        };
-        self.verse_rects = chapter.0;
-        self.hovered = chapter.1;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(palette.paper))
+            .show(ui, |ui| self.paint_chapter(ui, palette));
         let ctx = ui.ctx().clone();
         self.resolve_pointer(&ctx);
     }
@@ -168,9 +160,14 @@ impl ReaderApp {
                     .font(FontId::new(11.0, theme::sans()))
                     .color(palette.muted),
             );
-            if let Some(selected) = self.selected {
+            if let Some((start, end)) = self.selection.range() {
+                let line = if start == end {
+                    format!("selected {start}")
+                } else {
+                    format!("selected {start} to {end}")
+                };
                 ui.label(
-                    RichText::new(format!("selected {selected}"))
+                    RichText::new(line)
                         .font(FontId::new(11.0, theme::sans()))
                         .color(palette.accent),
                 );
@@ -185,356 +182,141 @@ impl ReaderApp {
         });
     }
 
-    /// Paints the chapter title and every verse of the chapter, returning the
-    /// verse rectangles and the verse under the pointer.
-    fn paint_chapter(
-        &self,
-        ui: &mut egui::Ui,
-        palette: Palette,
-    ) -> (Vec<(Reference, Rect)>, Option<Reference>) {
-        let mut rects = Vec::new();
-        let mut hovered = None;
-        let Some(book) = books::book(self.reference.book) else {
-            return (rects, hovered);
-        };
+    /// Paints the visible chapters of the reading surface and records the verse
+    /// rectangles so a press can resolve to a verse.
+    fn paint_chapter(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        self.verse_rects.clear();
+        self.hovered = None;
+
+        let ty = self.typography;
         let margin = 24.0;
-        let measure = self
-            .typography
+        let width = ty
             .measure()
             .min((ui.available_width() - margin * 2.0).max(200.0));
+        let viewport = ui.available_height().max(120.0);
+        let scroll = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            self.reader.scroll_by(-scroll);
+        }
 
-        ui.add_space(20.0);
-        ui.horizontal(|ui| {
-            ui.add_space(((ui.available_width() - measure) / 2.0).max(0.0));
-            ui.vertical(|ui| {
-                ui.set_max_width(measure);
-                self.paint_title(ui, book.name, palette);
-                ui.add_space(10.0);
-                self.paint_verses(ui, palette, measure, &mut rects, &mut hovered);
-                ui.add_space(48.0);
-            });
-        });
-        (rects, hovered)
-    }
+        let ctx = ui.ctx().clone();
+        let measure = typography::EguiMeasure::new(&ctx, ty);
+        let frame = self
+            .reader
+            .frame(&self.translation, &ty, width, viewport, &measure);
+        let selection = self.selection;
 
-    /// Paints the chapter title in the body face at semibold weight, with the
-    /// accent rule the reader uses under a new chapter.
-    fn paint_title(&self, ui: &mut egui::Ui, book: &str, palette: Palette) {
-        let mut job = LayoutJob::default();
-        job.append(
-            &format!("{book} {}", self.reference.chapter),
-            0.0,
-            TextFormat {
-                font_id: FontId::new(self.typography.chapter_title_size(), theme::body_family()),
-                color: palette.ink,
-                coords: VariationCoords::new([(b"wght", 600.0)]),
-                line_height: Some(self.typography.line_spacing()),
-                ..Default::default()
-            },
-        );
-        ui.label(job);
-        let width = ui.available_width().min(self.typography.measure());
-        ui.add_space(2.0);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, 1.0), egui::Sense::hover());
-        ui.painter().rect_filled(
-            Rect::from_min_size(rect.min, vec2(width * 0.14, 1.0)),
-            0.0,
-            palette.accent,
-        );
-    }
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), viewport), egui::Sense::hover());
+        let left = rect.min.x + ((rect.width() - width) * 0.5).max(0.0);
+        let top = rect.min.y;
+        let hover = ui.ctx().pointer_hover_pos();
+        let mut rects: Vec<(Reference, Rect)> = Vec::new();
+        let mut hovered = None;
 
-    /// Paints every verse of the chapter, honouring headings, poetry, and the
-    /// two paragraph modes.
-    fn paint_verses(
-        &self,
-        ui: &mut egui::Ui,
-        palette: Palette,
-        measure: f32,
-        rects: &mut Vec<(Reference, Rect)>,
-        hovered: &mut Option<Reference>,
-    ) {
-        let Some(chapter) = self
-            .translation
-            .chapter(self.reference.book, self.reference.chapter)
-        else {
-            return;
-        };
-        for verse in chapter {
-            let reference = Reference {
-                book: self.reference.book,
-                chapter: self.reference.chapter,
-                verse: Some(verse.number),
-            };
-            let text = self.translation.verse_text(verse);
-            if text.trim().is_empty() {
+        for placement in &frame.placements {
+            let Some(layout) = self.reader.layout(placement.book, placement.chapter) else {
                 continue;
-            }
-            if self.typography.headings {
-                for mark in self.translation.verse_marks(verse) {
-                    if mark.kind == MarkKind::Heading {
-                        let heading = self.translation.mark_payload(mark);
-                        if !heading.trim().is_empty() {
-                            self.paint_heading(ui, heading, palette);
-                        }
-                    }
-                }
-            }
-            let job = self.verse_job(verse, text, palette, measure);
-            let response = ui.add(egui::Label::new(job).wrap());
-            let rect = response.rect;
-            if response.hovered() {
-                *hovered = Some(reference);
-                ui.painter().rect_stroke(
-                    rect,
-                    2.0,
-                    Stroke::new(1.0, palette.rule),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            if self.selected == Some(reference) {
-                ui.painter().rect_stroke(
-                    rect,
-                    2.0,
-                    Stroke::new(1.5, palette.accent),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            rects.push((reference, rect));
-            if self.typography.paragraph_mode {
-                ui.add_space(self.typography.line_spacing() * 0.18);
-            }
-        }
-    }
-
-    /// Paints a section heading above the verse it introduces.
-    fn paint_heading(&self, ui: &mut egui::Ui, heading: &str, palette: Palette) {
-        ui.add_space(self.typography.line_spacing() * 0.4);
-        let mut job = LayoutJob::default();
-        job.append(
-            heading,
-            0.0,
-            TextFormat {
-                font_id: FontId::new(self.typography.heading_size(), theme::sans()),
-                color: palette.accent,
-                coords: VariationCoords::new([(b"wght", 600.0)]),
-                line_height: Some(self.typography.line_spacing()),
-                ..Default::default()
-            },
-        );
-        ui.label(job);
-        ui.add_space(2.0);
-    }
-
-    /// Builds the laid-out text of one verse.
-    ///
-    /// The verse number is a superscript in the sans face followed by a
-    /// non-breaking space, so it can never be separated from its verse by a line
-    /// break. Character styles inside the verse come from the core crate's span
-    /// ranges, and poetry breaks come from its mark ranges.
-    fn verse_job(&self, verse: &Verse, text: &str, palette: Palette, measure: f32) -> LayoutJob {
-        let ty = &self.typography;
-        let line_height = Some(ty.line_spacing());
-        let mut job = LayoutJob::default();
-        job.wrap.max_width = measure;
-        job.justify = ty.justify;
-
-        let base = TextFormat {
-            font_id: FontId::new(ty.size, theme::body_family()),
-            color: palette.ink,
-            line_height,
-            ..Default::default()
-        };
-
-        let mut prefix = String::new();
-        if ty.paragraph_mode && self.starts_paragraph(verse) {
-            prefix.push('\u{2003}');
-        }
-        for mark in self.translation.verse_marks(verse) {
-            if mark.kind == MarkKind::StanzaBreak {
-                prefix.push('\n');
-            }
-        }
-        if !prefix.is_empty() {
-            job.append(&prefix, 0.0, base.clone());
-        }
-
-        if ty.verse_numbers {
-            let number = if verse.number_end > verse.number {
-                format!("{}\u{2013}{}\u{00A0}", verse.number, verse.number_end)
-            } else {
-                format!("{}\u{00A0}", verse.number)
             };
-            job.append(
-                &number,
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(ty.verse_number_size(), theme::sans()),
-                    color: palette.verse_number,
-                    valign: Align::TOP,
-                    line_height,
-                    ..Default::default()
-                },
-            );
-        }
+            let chapter_top = top + placement.top;
+            for line in &layout.lines {
+                let line_top = chapter_top + line.top;
+                if line_top > top + viewport || line_top + line.height < top {
+                    continue;
+                }
+                let right = line
+                    .runs
+                    .iter()
+                    .map(|run| run.x + run.width)
+                    .fold(line.indent, f32::max);
+                let line_rect = Rect::from_min_size(
+                    pos2(left + line.indent, line_top),
+                    vec2((right - line.indent).max(2.0), line.height),
+                );
 
-        for (chunk, format) in self.verse_chunks(verse, text, palette, &base) {
-            job.append(&chunk, 0.0, format);
-        }
-        job
-    }
-
-    /// Whether the verse opens a new paragraph.
-    fn starts_paragraph(&self, verse: &Verse) -> bool {
-        self.translation
-            .verse_marks(verse)
-            .iter()
-            .any(|mark| mark.kind == MarkKind::Paragraph)
-    }
-
-    /// Splits a verse's text into styled chunks for layout.
-    ///
-    /// The split points are the poetry line breaks from the mark array and the
-    /// character style ranges from the span array. Every chunk carries the exact
-    /// format it is painted with.
-    fn verse_chunks(
-        &self,
-        verse: &Verse,
-        text: &str,
-        palette: Palette,
-        base: &TextFormat,
-    ) -> Vec<(String, TextFormat)> {
-        let ty = &self.typography;
-        let line_height = Some(ty.line_spacing());
-        let italic = TextFormat {
-            font_id: FontId::new(ty.size, theme::body_italic_family()),
-            color: palette.ink,
-            line_height,
-            ..Default::default()
-        };
-        let divine = TextFormat {
-            font_id: FontId::new(ty.divine_name_size(), theme::body_family()),
-            color: palette.ink,
-            line_height,
-            ..Default::default()
-        };
-        let red = TextFormat {
-            color: if ty.red_letters {
-                palette.words_of_christ
-            } else {
-                palette.ink
-            },
-            ..base.clone()
-        };
-        let superscription = TextFormat {
-            font_id: FontId::new(ty.size, theme::body_italic_family()),
-            color: palette.muted,
-            line_height,
-            ..Default::default()
-        };
-        let superscript = self
-            .translation
-            .verse_marks(verse)
-            .iter()
-            .any(|mark| mark.kind == MarkKind::Superscription);
-
-        let mut breaks: Vec<(usize, u8)> = Vec::new();
-        for mark in self.translation.verse_marks(verse) {
-            match mark.kind {
-                MarkKind::PoetryLine => breaks.push((mark.offset as usize, 0)),
-                MarkKind::PoetryIndent => {
-                    if let Some(entry) = breaks
-                        .iter_mut()
-                        .find(|entry| entry.0 == mark.offset as usize)
-                    {
-                        entry.1 = mark.level;
-                    } else {
-                        breaks.push((mark.offset as usize, mark.level));
+                if let Some(reference) = line.verse {
+                    if selection.contains(reference) {
+                        ui.painter().rect_filled(line_rect, 2.0, palette.selection);
                     }
-                }
-                _ => {}
-            }
-        }
-        breaks.sort_by_key(|entry| entry.0);
-        breaks.dedup_by_key(|entry| entry.0);
-
-        let mut cuts: Vec<usize> = vec![0, text.len()];
-        for (offset, _) in &breaks {
-            cuts.push(*offset);
-        }
-        for span in self.translation.verse_spans(verse) {
-            cuts.push(span.start as usize);
-            cuts.push(span.end as usize);
-        }
-        cuts.retain(|cut| *cut <= text.len() && text.is_char_boundary(*cut));
-        cuts.sort_unstable();
-        cuts.dedup();
-
-        let mut chunks = Vec::new();
-        for pair in cuts.windows(2) {
-            let (start, end) = (pair[0], pair[1]);
-            if start == end {
-                continue;
-            }
-            let mut chunk = String::new();
-            if let Some((_, level)) = breaks.iter().find(|entry| entry.0 == start) {
-                chunk.push('\n');
-                for _ in 0..*level {
-                    chunk.push_str("\u{2003}\u{2003}");
-                }
-            }
-            let slice = &text[start..end];
-            let style = self
-                .translation
-                .verse_spans(verse)
-                .iter()
-                .filter(|span| start >= span.start as usize && start < span.end as usize)
-                .min_by_key(|span| span.end - span.start)
-                .map(|span| span.style);
-            let format = match style {
-                Some(SpanStyle::WordsOfChrist) => red.clone(),
-                Some(SpanStyle::TranslatorAddition) => italic.clone(),
-                Some(SpanStyle::DivineName) => {
-                    chunk.push_str(&slice.to_uppercase());
-                    divine.clone()
-                }
-                Some(SpanStyle::Selah) => italic.clone(),
-                None => {
-                    if superscript {
-                        superscription.clone()
-                    } else {
-                        base.clone()
+                    if hover.is_some_and(|position| line_rect.contains(position)) {
+                        hovered = Some(reference);
                     }
+                    rects.push((reference, line_rect));
                 }
-            };
-            if style != Some(SpanStyle::DivineName) {
-                chunk.push_str(slice);
+
+                for run in &line.runs {
+                    ui.painter().text(
+                        pos2(left + run.x, chapter_top + run.top),
+                        egui::Align2::LEFT_TOP,
+                        &run.text,
+                        typography::font_id(run.role, &ty),
+                        run.role.color(&ty, &palette),
+                    );
+                }
+
+                if hovered.is_some_and(|reference| Some(reference) == line.verse) {
+                    ui.painter().rect_stroke(
+                        line_rect,
+                        2.0,
+                        Stroke::new(1.0, palette.rule),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
-            chunks.push((chunk, format));
         }
-        chunks
+
+        self.verse_rects = rects;
+        self.hovered = hovered;
+        self.reference = self.reader.anchor();
     }
 
-    /// Turns a pointer press into a selected verse.
+    /// Turns a pointer press into a selected verse and the J and K keys into a
+    /// one-verse move.
     ///
     /// The mapping uses the rectangles the last paint recorded, so a press
-    /// selects the verse that was under the pointer when it was painted.
+    /// selects the verse that was under the pointer when it was painted. A press
+    /// with shift held extends the selection instead of replacing it.
     fn resolve_pointer(&mut self, ctx: &egui::Context) {
         let press = ctx.input(|input| {
-            input
-                .pointer
-                .primary_clicked()
-                .then(|| input.pointer.interact_pos())
-                .flatten()
+            if input.pointer.primary_clicked() {
+                input
+                    .pointer
+                    .interact_pos()
+                    .map(|position| (position, input.modifiers.shift))
+            } else {
+                None
+            }
         });
-        let Some(position) = press else {
-            return;
-        };
-        if let Some((reference, _)) = self
-            .verse_rects
-            .iter()
-            .find(|(_, rect)| rect.contains(position))
+        if let Some((position, shift)) = press
+            && let Some((reference, _)) = self
+                .verse_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(position))
         {
-            self.selected = Some(*reference);
+            if shift {
+                self.selection.extend_to(*reference);
+            } else {
+                self.selection.select(*reference);
+            }
+        }
+
+        let step = ctx.input(|input| {
+            if input.key_pressed(egui::Key::J) {
+                Some(selection::Step::Next)
+            } else if input.key_pressed(egui::Key::K) {
+                Some(selection::Step::Previous)
+            } else {
+                None
+            }
+        });
+        if let Some(direction) = step
+            && let Some(focus) = self.selection.focus()
+        {
+            let chapter = self
+                .translation
+                .chapter(focus.book, focus.chapter)
+                .unwrap_or(&[]);
+            self.selection.step(direction, chapter);
         }
     }
 }
