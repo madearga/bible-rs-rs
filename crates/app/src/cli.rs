@@ -503,23 +503,64 @@ fn write_export(path: &Path, contents: &str) -> Result<()> {
     temporary_name.push(name);
     temporary_name.push(format!(".tmp-{}-{unique}", std::process::id()));
     let temporary = parent.join(temporary_name);
+    write_export_at(path, &temporary, contents)
+}
 
-    let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("cannot create {}", temporary.display()))?;
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("cannot write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("cannot flush {}", temporary.display()))?;
-        drop(file);
-        fs::rename(&temporary, path).with_context(|| format!("cannot write {}", path.display()))
-    })();
+/// Writes an export through the temporary path it is given and renames it into
+/// place. Only a temporary file this call created is cleaned up on failure.
+fn write_export_at(path: &Path, temporary: &Path, contents: &str) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary)
+        .with_context(|| format!("cannot create {}", temporary.display()))?;
 
+    let write = file
+        .write_all(contents.as_bytes())
+        .with_context(|| format!("cannot write {}", temporary.display()))
+        .and_then(|()| {
+            file.sync_all()
+                .with_context(|| format!("cannot flush {}", temporary.display()))
+        });
+    drop(file);
+
+    let result = write.and_then(|()| {
+        fs::rename(temporary, path).with_context(|| format!("cannot write {}", path.display()))
+    });
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_export_at;
+    use std::path::PathBuf;
+
+    /// A scratch folder for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bible-cli-unit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch folder");
+        dir
+    }
+
+    #[test]
+    fn a_temporary_file_this_call_did_not_create_survives_a_collision() {
+        let dir = scratch("export-temp-collision");
+        let destination = dir.join("out.json");
+        let temporary = dir.join(".out.json.tmp-sentinel");
+        std::fs::write(&temporary, "owned sentinel").expect("write the sentinel");
+
+        let error = write_export_at(&destination, &temporary, "exported")
+            .expect_err("an existing temporary path is rejected");
+        assert!(error.to_string().contains("cannot create"), "{error:#}");
+        assert_eq!(
+            std::fs::read_to_string(&temporary).expect("the sentinel remains"),
+            "owned sentinel"
+        );
+        assert!(!destination.exists(), "the destination was not written");
+    }
 }
