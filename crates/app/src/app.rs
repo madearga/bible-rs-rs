@@ -17,7 +17,7 @@ use bible_core::Reference;
 use bible_core::Translation;
 use bible_core::books;
 use bible_core::search::Corpus;
-use bible_core::study::Store;
+use bible_core::study::{Settings, Store, Theme as StoredTheme};
 use bible_core::{Bookmark, HighlightColour};
 use eframe::egui;
 use egui::{Align, FontId, Pos2, Rect, RichText, Stroke, pos2, vec2};
@@ -34,6 +34,17 @@ use crate::sidebar::{self, MarginMarkers, Row};
 use crate::theme::{self, Palette, Theme, Typography};
 use crate::typography;
 use crate::verse_menu::{CompareRow, MenuAction, VerseMenu};
+
+/// The explicit theme, place, and restoration choices a window starts with.
+///
+/// Grouping them keeps [`ReaderApp::build`] from threading four related
+/// arguments separately through every constructor.
+struct Startup {
+    theme: Theme,
+    reference: Reference,
+    restore_position: bool,
+    restore_appearance: bool,
+}
 
 /// The reading application.
 ///
@@ -74,7 +85,19 @@ impl ReaderApp {
     /// bundled translation is used, so the first frame paints scripture even on
     /// a machine that has never installed anything.
     pub fn open(cc: &eframe::CreationContext<'_>, theme: Theme, reference: Reference) -> Self {
-        Self::open_with_translation(cc, theme, reference, None)
+        // An environment override is an explicit choice, so it keeps the theme
+        // or place the environment asked for instead of the saved one. With no
+        // override the window reopens exactly as the reader left it.
+        let restore_position = std::env::var_os("BIBLE_REFERENCE").is_none();
+        let restore_appearance = std::env::var_os("BIBLE_THEME").is_none();
+        Self::open_from(
+            cc,
+            theme,
+            reference,
+            None,
+            restore_position,
+            restore_appearance,
+        )
     }
 
     /// Opens the reader with a named translation rather than the default.
@@ -89,7 +112,21 @@ impl ReaderApp {
         reference: Reference,
         translation: Option<&str>,
     ) -> Self {
-        theme::install(&cc.egui_ctx, theme);
+        // The harness states the theme, place, and translation it wants, so a
+        // shot never depends on what an earlier run happened to save.
+        Self::open_from(cc, theme, reference, translation, false, false)
+    }
+
+    /// Opens the reader with the default data folder, restoring the saved
+    /// place and appearance only when the caller asked for that.
+    fn open_from(
+        cc: &eframe::CreationContext<'_>,
+        theme: Theme,
+        reference: Reference,
+        translation: Option<&str>,
+        restore_position: bool,
+        restore_appearance: bool,
+    ) -> Self {
         let library = Library::discover();
         let mut status = String::new();
         let translation = match library.load(translation) {
@@ -103,8 +140,12 @@ impl ReaderApp {
         };
         Self::build(
             cc,
-            theme,
-            reference,
+            Startup {
+                theme,
+                reference,
+                restore_position,
+                restore_appearance,
+            },
             library,
             translation,
             status,
@@ -126,8 +167,12 @@ impl ReaderApp {
         });
         Self::build(
             cc,
-            theme,
-            reference,
+            Startup {
+                theme,
+                reference,
+                restore_position: true,
+                restore_appearance: true,
+            },
             library,
             translation,
             String::new(),
@@ -151,8 +196,12 @@ impl ReaderApp {
         });
         Self::build(
             cc,
-            theme,
-            reference,
+            Startup {
+                theme,
+                reference,
+                restore_position: false,
+                restore_appearance: false,
+            },
             library,
             translation,
             String::new(),
@@ -161,16 +210,28 @@ impl ReaderApp {
     }
 
     /// Builds the window on a place with a study store opened on the side.
+    ///
+    /// The restoration flags in [`Startup`] are false for the harness, which
+    /// must be deterministic, and for an explicit `BIBLE_THEME` override, which
+    /// must win over what was saved. A fresh store has no saved row, so the
+    /// current GUI defaults stay in force instead of the core defaults.
     fn build(
         cc: &eframe::CreationContext<'_>,
-        theme: Theme,
-        reference: Reference,
+        startup: Startup,
         library: Library,
         translation: Arc<Translation>,
         mut status: String,
         data: &std::path::Path,
     ) -> Self {
-        theme::install(&cc.egui_ctx, theme);
+        let Startup {
+            theme,
+            reference,
+            restore_position,
+            restore_appearance,
+        } = startup;
+        // Checked before the store creates the file, so a fresh store is
+        // distinguishable from one that already holds a saved settings row.
+        let had_store = data.join("study.db").exists();
         let study = match Store::open(data.join("study.db")) {
             Ok(study) => study,
             Err(error) => {
@@ -188,19 +249,28 @@ impl ReaderApp {
             }
         };
         // The store remembers where the reader was, so a window opens where the
-        // last one stopped rather than at the first page.
+        // last one stopped rather than at the first page. An explicit place
+        // from the environment or the harness wins over the saved one.
         let remembered = study.settings().position;
-        let start = if remembered.chapter == 0 {
-            reference
-        } else {
+        let start = if restore_position && remembered.chapter != 0 {
             remembered
+        } else {
+            reference
         };
+        // The saved row is the reader's appearance. On a fresh store there is
+        // none, so the current GUI typography and the caller's theme remain.
+        let (theme, typography) = if restore_appearance && had_store {
+            preferences(study.settings())
+        } else {
+            (theme, Typography::default())
+        };
+        theme::install(&cc.egui_ctx, theme);
         Self {
             library,
             translation,
             reference: start.chapter_only(),
             theme,
-            typography: Typography::default(),
+            typography,
             applied_theme: Some(theme),
             reader: Reader::new(start.chapter_only()),
             selection: Selection::new(),
@@ -333,6 +403,17 @@ impl ReaderApp {
         self.theme
     }
 
+    /// The typography (size, spacing, measure, and text treatments) currently
+    /// painted, which a test reads to prove a saved preference was restored.
+    pub fn typography(&self) -> Typography {
+        self.typography
+    }
+
+    /// The status line's message, empty when there is nothing to report.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
     /// Whether the jump palette is on screen.
     pub fn palette_is_open(&self) -> bool {
         self.palette.is_open()
@@ -445,6 +526,7 @@ impl ReaderApp {
                         let label = format!("Theme: {}", self.theme.name());
                         if ui.button(label).clicked() {
                             self.theme = self.theme.next();
+                            self.save_appearance();
                         }
                         ui.label(
                             RichText::new(self.translation.meta().abbreviation.clone())
@@ -729,6 +811,43 @@ impl ReaderApp {
         }
     }
 
+    /// Writes the theme and typography into the study settings.
+    ///
+    /// The position is left alone, so changing the appearance never moves the
+    /// reader. The store coalesces these writes on its 1.5 second throttle, and
+    /// [`ReaderApp::flush_settings`] writes a pending change on the way out.
+    fn save_appearance(&mut self) {
+        let mut settings = self.study.settings().clone();
+        settings.theme = match self.theme {
+            Theme::Light => StoredTheme::Light,
+            Theme::Sepia => StoredTheme::Sepia,
+            Theme::Dark => StoredTheme::Dark,
+        };
+        settings.text_size = self.typography.size;
+        settings.line_spacing = self.typography.line_height;
+        settings.line_length = self.typography.measure_em;
+        settings.justify = self.typography.justify;
+        settings.show_verse_numbers = self.typography.verse_numbers;
+        settings.show_headings = self.typography.headings;
+        settings.words_of_christ_red = self.typography.red_letters;
+        if let Err(error) = self.study.set_settings(settings) {
+            self.status = format!("cannot save the reader preferences: {error:#}");
+        }
+    }
+
+    /// Writes a settings change that is still waiting on the throttle.
+    ///
+    /// Called from the shutdown hook and from [`Drop`], so a change made right
+    /// before the window closes survives an immediate restart. A disk error is
+    /// reported rather than silently swallowed.
+    fn flush_settings(&mut self) {
+        if let Err(error) = self.study.flush() {
+            let message = format!("cannot save the reader preferences: {error:#}");
+            eprintln!("{message}");
+            self.status = message;
+        }
+    }
+
     /// The chapter before or after a place, staying inside the canon.
     fn adjacent_chapter(reference: Reference, forward: bool) -> Option<Reference> {
         let book = books::book(reference.book)?;
@@ -783,6 +902,14 @@ impl ReaderApp {
     /// Performs one action from the shortcut table.
     fn perform(&mut self, action: Action, ctx: &egui::Context) {
         let now = ctx.input(|input| input.time);
+        let appearance = matches!(
+            action,
+            Action::ToggleRedLetter
+                | Action::CycleTheme
+                | Action::TextLarger
+                | Action::TextSmaller
+                | Action::TextDefault
+        );
         match action {
             Action::JumpPalette => self.palette.open(),
             Action::Search => self.search.open(),
@@ -870,6 +997,9 @@ impl ReaderApp {
             Action::TextLarger => self.typography.size = (self.typography.size + 1.0).min(32.0),
             Action::TextSmaller => self.typography.size = (self.typography.size - 1.0).max(12.0),
             Action::TextDefault => self.typography.size = Typography::default().size,
+        }
+        if appearance {
+            self.save_appearance();
         }
     }
 
@@ -1150,6 +1280,14 @@ fn shortcut_key(key: egui::Key) -> Option<ShortcutKey> {
     })
 }
 
+impl Drop for ReaderApp {
+    /// A harness drops the app without an `eframe` shutdown hook, so the pending
+    /// settings write is flushed here as well as in the window's exit hook.
+    fn drop(&mut self) {
+        self.flush_settings();
+    }
+}
+
 impl eframe::App for ReaderApp {
     /// Paints one frame, swapping the style only when the theme changed.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1161,6 +1299,11 @@ impl eframe::App for ReaderApp {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
         self.paint(ui);
+    }
+
+    /// Writes any pending settings change before the window closes.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.flush_settings();
     }
 }
 
@@ -1450,6 +1593,29 @@ fn parse_point(input: &str) -> Result<Pos2> {
             .parse()
             .context("the y coordinate is not a number")?,
     ))
+}
+
+/// Maps a saved settings row onto the reader's theme and typography.
+///
+/// `paragraph_mode` has no counterpart in the core settings row, so it keeps
+/// the current GUI default rather than being invented here.
+fn preferences(settings: &Settings) -> (Theme, Typography) {
+    let theme = match settings.theme {
+        StoredTheme::Light => Theme::Light,
+        StoredTheme::Sepia => Theme::Sepia,
+        StoredTheme::Dark => Theme::Dark,
+    };
+    let typography = Typography {
+        size: settings.text_size,
+        line_height: settings.line_spacing,
+        measure_em: settings.line_length,
+        justify: settings.justify,
+        verse_numbers: settings.show_verse_numbers,
+        headings: settings.show_headings,
+        red_letters: settings.words_of_christ_red,
+        ..Typography::default()
+    };
+    (theme, typography)
 }
 
 /// The chapter a shot opens by default, used when no reference is given. John 3
