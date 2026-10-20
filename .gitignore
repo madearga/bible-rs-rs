@@ -3,6 +3,10 @@
 *.pdb
 .DS_Store
 
+# The macOS bundle the build script writes. It is a build product that holds
+# a copy of the release binary, so it is never committed.
+/dist/
+
 # The data build downloads the raw USFM archives into the cache and imports them
 # from there. Only the derived .bbl files under data/translations are committed;
 # the raw scripture sources and the zips are never part of the repository.
@@ -13,3 +17,6 @@
 *_usfm.zip
 data/translations/*.part
 data/translations/*.tmp
+
+# Python bytecode from the local scripts.
+__pycache__/
