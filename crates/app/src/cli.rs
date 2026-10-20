@@ -25,7 +25,8 @@ usage: bible <verb> [arguments]
 
 verbs:
   read <reference> [--translation <id>]   print a verse or a chapter
-  search <query> [--translation <id>]     print the verses a query matches
+  search <query> [--translation <id>] [--limit <n>]
+                                          print the verses a query matches
   import <path> [--id <id>]               install a translation file
   translations                            list the translations
   export <path> [--format json|markdown]  write the study data out
@@ -152,6 +153,14 @@ fn search(
     if needle.trim().is_empty() {
         return Err(UsageError("search needs a non-empty query".to_owned()).into());
     }
+    let limit = match flags.get("limit") {
+        Some(value) => Some(
+            value
+                .parse::<usize>()
+                .map_err(|_| UsageError(format!("the limit {value:?} is not a number")))?,
+        ),
+        None => None,
+    };
     let translation = library.load(flags.get("translation").map(String::as_str))?;
     let mut matches = 0usize;
     for book in books::books() {
@@ -160,6 +169,9 @@ fn search(
                 continue;
             };
             for verse in verses {
+                if limit.is_some_and(|limit| matches >= limit) {
+                    return Ok(());
+                }
                 let text = translation.verse_text(verse);
                 if text.to_lowercase().contains(&needle) {
                     let reference = Reference {
@@ -180,23 +192,27 @@ fn search(
 }
 
 /// Prints the translations the app ships with and what is installed here.
+///
+/// The seven names and abbreviations come from each file's own header, so the
+/// list cannot claim a name the embedded text does not carry.
 fn translations(library: &Library) -> Result<()> {
     println!("id\tabbreviation\tname\tstatus");
-    for bundled in BUNDLED_TRANSLATIONS {
-        let status = if library.find(bundled.id).is_some() {
-            "installed"
+    for bundled in &BUNDLED_TRANSLATIONS {
+        let meta = bundled.meta()?;
+        let status = if library.find(bundled.id()).is_some() {
+            "bundled, installed locally"
         } else {
-            "not installed"
+            "bundled"
         };
         println!(
             "{}\t{}\t{}\t{}",
-            bundled.id, bundled.abbreviation, bundled.name, status
+            meta.id, meta.abbreviation, meta.name, status
         );
     }
     for entry in library.installed() {
         if BUNDLED_TRANSLATIONS
             .iter()
-            .any(|bundled| bundled.id == entry.meta.id)
+            .any(|bundled| bundled.id() == entry.meta.id)
         {
             continue;
         }

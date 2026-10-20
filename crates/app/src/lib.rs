@@ -6,20 +6,23 @@
 //! The crate is split three ways. [`theme`] owns every colour and every font the
 //! reader paints with, [`app`] owns the window and the reading surface, and
 //! [`cli`] owns the command line that scripts the same core crate. The data
-//! layer below is what the window and the command line share: the catalog of
-//! translations that ship with the app, the installed translations on this
-//! machine, and the study file.
+//! layer below is what the window and the command line share: the translations
+//! compiled into the binary, the installed translations on this machine, and the
+//! study file.
 
 #![warn(missing_docs)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use bible_core::{Translation, format};
 use serde::{Deserialize, Serialize};
 
 pub mod app;
+pub mod bundled;
 pub mod cli;
 pub mod reader;
 pub mod selection;
@@ -30,88 +33,19 @@ pub mod typography;
 mod reader_tests;
 
 pub use app::ReaderApp;
+pub use bundled::{
+    BUNDLED_TRANSLATIONS, BundledTranslation, DEFAULT_TRANSLATION_ID, default_translation,
+};
 
-/// One translation that ships with the app.
+/// The identifier that selects the synthetic sample rather than scripture.
 ///
-/// Only the identity is compiled in. The text is built from the source archives
-/// by the data pipeline and lives in `data/translations`, so the repository
-/// never carries scripture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BundledTranslation {
-    /// The stable identifier, also the file stem.
-    pub id: &'static str,
-    /// The short label shown in the translation list.
-    pub abbreviation: &'static str,
-    /// The full display name.
-    pub name: &'static str,
-    /// The language name.
-    pub language: &'static str,
-    /// The licence the text is distributed under.
-    pub licence: &'static str,
-}
+/// The sample is generated words only. It exists so the render harness has a
+/// page to paint that no translation produces, which is how a shot of real text
+/// is proven to differ from a shot of the placeholder.
+pub const SAMPLE_TRANSLATION_ID: &str = "sample";
 
-/// The translations the app is built to ship with, in menu order.
-pub const BUNDLED_TRANSLATIONS: [BundledTranslation; 8] = [
-    BundledTranslation {
-        id: "kjv",
-        abbreviation: "KJV",
-        name: "King James Version",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "web",
-        abbreviation: "WEB",
-        name: "World English Bible",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "bsb",
-        abbreviation: "BSB",
-        name: "Berean Standard Bible",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "asv",
-        abbreviation: "ASV",
-        name: "American Standard Version",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "ylt",
-        abbreviation: "YLT",
-        name: "Young's Literal Translation",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "darby",
-        abbreviation: "DARBY",
-        name: "Darby Bible",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "webster",
-        abbreviation: "WEBSTER",
-        name: "Webster Bible",
-        language: "English",
-        licence: "Public domain",
-    },
-    BundledTranslation {
-        id: "sample",
-        abbreviation: "SAMPLE",
-        name: "Synthetic Sample",
-        language: "English",
-        licence: "Generated text, not scripture",
-    },
-];
-
-/// The sample translation, generated from non-scripture words, so the window and
-/// the harness have a page to paint before any translation is installed.
+/// The sample translation, generated from non-scripture words, so the harness
+/// has a page that is visibly not scripture.
 const SAMPLE_BYTES: &[u8] = include_bytes!("../../../assets/sample/passage.bbl");
 
 /// The folder the app reads translations and writes study data to.
@@ -148,8 +82,9 @@ pub fn translations_dir(dir: &Path) -> PathBuf {
 
 /// The embedded sample translation, decoded.
 ///
-/// The sample holds generated words only. It exists so the reader has a
-/// typographic page to paint on a machine with no translation installed.
+/// The sample holds generated words only. It exists so the render harness can
+/// paint a page that is not scripture and prove a real translation reaches the
+/// screen.
 pub fn sample_translation() -> Result<Translation> {
     format::decode(SAMPLE_BYTES).context("the embedded sample translation does not decode")
 }
@@ -166,12 +101,16 @@ pub struct InstalledTranslation {
 /// The translations this machine can read.
 ///
 /// Discovery reads the uncompressed header of every `.bbl` file, so listing the
-/// installed translations never decompresses a body. A translation is loaded
-/// only when the reader opens it.
-#[derive(Clone, Debug, Default)]
+/// translations never decompresses a body. The seven compiled-in translations
+/// are always available and an installed file of the same identifier takes
+/// precedence over them. A translation is decoded the first time it is asked
+/// for and kept in memory afterwards, so a switch back to one already read is
+/// instant.
+#[derive(Debug, Default)]
 pub struct Library {
     dir: PathBuf,
     installed: Vec<InstalledTranslation>,
+    loaded: Mutex<BTreeMap<String, Arc<Translation>>>,
 }
 
 impl Library {
@@ -194,7 +133,11 @@ impl Library {
             }
         }
         installed.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
-        Self { dir, installed }
+        Self {
+            dir,
+            installed,
+            loaded: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// Reads the translations installed in the folder [`data_dir`] names.
@@ -217,28 +160,55 @@ impl Library {
         self.installed.iter().find(|entry| entry.meta.id == id)
     }
 
-    /// Loads a translation by identifier.
+    /// Loads a translation by identifier, decoding it the first time it is
+    /// asked for.
     ///
-    /// With no identifier the first installed translation is used, and with
-    /// none installed the embedded sample is used, so the reader always has a
-    /// page to paint.
-    pub fn load(&self, id: Option<&str>) -> Result<Translation> {
-        let path = match id {
-            Some(id) => {
-                let entry = self
-                    .find(id)
-                    .with_context(|| format!("no translation called {id} is installed"))?;
-                entry.path.clone()
-            }
-            None => match self.installed.first() {
-                Some(entry) => entry.path.clone(),
-                None => return sample_translation(),
-            },
-        };
-        let bytes = fs::read(&path)
-            .with_context(|| format!("cannot read the translation at {}", path.display()))?;
-        format::decode(&bytes)
-            .with_context(|| format!("the translation at {} does not decode", path.display()))
+    /// With no identifier the default bundled translation is used, and the
+    /// sample is used only when a caller asks for it by its own identifier. An
+    /// installed file wins over a bundled one with the same identifier, so a
+    /// translation the user installed replaces the compiled-in copy.
+    pub fn load(&self, id: Option<&str>) -> Result<Arc<Translation>> {
+        let id = id.unwrap_or(DEFAULT_TRANSLATION_ID);
+        if let Some(cached) = self
+            .loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let translation = Arc::new(self.decode(id)?);
+        let mut loaded = self
+            .loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok(loaded
+            .entry(id.to_owned())
+            .or_insert_with(|| Arc::clone(&translation))
+            .clone())
+    }
+
+    /// Decodes one translation without consulting the cache.
+    fn decode(&self, id: &str) -> Result<Translation> {
+        if id == SAMPLE_TRANSLATION_ID {
+            return sample_translation();
+        }
+        if let Some(entry) = self.find(id) {
+            let bytes = fs::read(&entry.path).with_context(|| {
+                format!("cannot read the translation at {}", entry.path.display())
+            })?;
+            return format::decode(&bytes).with_context(|| {
+                format!(
+                    "the translation at {} does not decode",
+                    entry.path.display()
+                )
+            });
+        }
+        if let Some(entry) = bundled::find(id) {
+            return entry.decode();
+        }
+        bail!("no translation called {id} is bundled or installed")
     }
 
     /// Writes a translation's binary form into the library folder.
@@ -258,6 +228,10 @@ impl Library {
         fs::write(&path, &bytes).with_context(|| format!("cannot write {}", path.display()))?;
         self.installed
             .retain(|entry| entry.meta.id != translation.meta().id);
+        self.loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(id);
         self.installed.push(InstalledTranslation {
             meta: translation.meta().clone(),
             path: path.clone(),
