@@ -5,9 +5,9 @@
 # Checks the built macOS bundle. The script is the artifact a reviewer runs to
 # confirm the bundle on disk is the one the build produced.
 #
-# The script reads the bundle and never writes to it. It exits zero when every
-# check passes and non-zero on the first failure, and it prints the command and
-# the output for every check so the evidence is in the transcript.
+# The script reads the bundle and never writes to it. It records every check,
+# prints the command and the output for each one, and exits zero only when all
+# checks pass; failures are accumulated and reported together.
 #
 # The optional launch check runs the bundled binary with a scratch data
 # directory so the reviewer's own study data is never touched. It is skipped
@@ -378,14 +378,15 @@ fi
 section "Launch"
 
 if [[ "${1:-}" == "--launch" ]]; then
+  # No child process runs when the scratch directory cannot be created: the
+  # binary must never fall back to the reviewer's real data directory.
   if ! SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/u11-verify.XXXXXX")"; then
     fail "cannot create a scratch data directory for the launch check"
-    SCRATCH=""
+    printf 'the launch check did not run\n'
+    exit 1
   fi
-  if [[ -n "$SCRATCH" ]]; then
-    cleanup_scratch() { rm -r "$SCRATCH"; }
-    trap cleanup_scratch EXIT
-  fi
+  cleanup_scratch() { rm -r "$SCRATCH"; }
+  trap cleanup_scratch EXIT
   printf 'note  the launch check writes only into %s\n' "$SCRATCH"
 
   if run "bundled CLI" env BIBLE_DATA_DIR="$SCRATCH" "$BINARY" translations; then

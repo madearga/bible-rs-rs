@@ -361,8 +361,9 @@ def main() -> int:
 
     output = pathlib.Path(args.output)
 
-    # The check reads the committed index instead of resolving Cargo again, so
-    # it works offline and in a checkout where the registry has been cleaned.
+    # The check validates the committed index and that every file it names is
+    # present. It does not re-resolve the dependency closure, so it works
+    # offline and in a checkout where the registry has been cleaned.
     if args.check:
         index = output / "INDEX.md"
         if not index.is_file():

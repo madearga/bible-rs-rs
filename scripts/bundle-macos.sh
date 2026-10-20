@@ -91,9 +91,8 @@ PY
 [[ -f "$BINARY_PATH" ]] || fail "cargo reported a missing executable at $BINARY_PATH"
 [[ -x "$BINARY_PATH" ]] || fail "$BINARY_PATH is not executable"
 
-# Refuse to bundle a binary that does not look like the one this build
-# produced. A stale binary in the target directory is the failure mode a
-# reviewer would hit, so the check is explicit rather than assumed.
+# Refuse to bundle a file that is not a Mach-O executable. This checks the
+# file type only; it does not prove the file is fresh.
 FILE_INFO="$(file -b "$BINARY_PATH")"
 case "$FILE_INFO" in
   *Mach-O*) ;;
@@ -122,8 +121,9 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/$BINARY_NAME"
 chmod 755 "$MACOS_DIR/$BINARY_NAME"
 
-# The bundled copy has to be the binary cargo just produced. Comparing the two
-# byte for byte catches a stale binary in the target directory.
+# The bundled copy has to be a byte-for-byte copy of the executable Cargo
+# reported. This proves copy fidelity, not freshness; freshness rests on using
+# the path from the build's own compiler-artifact message.
 if ! cmp -s "$BINARY_PATH" "$MACOS_DIR/$BINARY_NAME"; then
   fail "the bundled binary is not the binary cargo just built at $BINARY_PATH"
 fi
@@ -289,4 +289,6 @@ log "It is an unsigned developer build with an ad-hoc signature."
 log "A bundle you built here has no quarantine attribute, so open it with:"
 log "  open \"$BUNDLE_DIR\""
 log "A bundle that arrived from somewhere else carries a quarantine attribute."
-log "macOS refuses it the first time, so right-click it in Finder and choose Open."
+log "macOS refuses it the first time. On macOS Sequoia, use System Settings >"
+log "Privacy & Security > Security > Open Anyway for the blocked app. That flow"
+log "is not guaranteed to succeed and does not change any security setting."
