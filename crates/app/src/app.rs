@@ -33,6 +33,17 @@ use crate::theme::{self, Palette, Theme, Typography};
 use crate::typography;
 use crate::verse_menu::{CompareRow, MenuAction, VerseMenu};
 
+/// The explicit theme, place, and restoration choices a window starts with.
+///
+/// Grouping them keeps [`ReaderApp::build`] from threading four related
+/// arguments separately through every constructor.
+struct Startup {
+    theme: Theme,
+    reference: Reference,
+    restore_position: bool,
+    restore_appearance: bool,
+}
+
 /// The reading application.
 ///
 /// The state is flat on purpose. One translation is loaded at a time, the
@@ -125,14 +136,16 @@ impl ReaderApp {
         };
         Self::build(
             cc,
-            theme,
-            reference,
+            Startup {
+                theme,
+                reference,
+                restore_position,
+                restore_appearance,
+            },
             library,
             translation,
             status,
             &crate::data_dir(),
-            restore_position,
-            restore_appearance,
         )
     }
 
@@ -150,14 +163,16 @@ impl ReaderApp {
         });
         Self::build(
             cc,
-            theme,
-            reference,
+            Startup {
+                theme,
+                reference,
+                restore_position: true,
+                restore_appearance: true,
+            },
             library,
             translation,
             String::new(),
             data,
-            true,
-            true,
         )
     }
 
@@ -177,35 +192,39 @@ impl ReaderApp {
         });
         Self::build(
             cc,
-            theme,
-            reference,
+            Startup {
+                theme,
+                reference,
+                restore_position: false,
+                restore_appearance: false,
+            },
             library,
             translation,
             String::new(),
             data,
-            false,
-            false,
         )
     }
 
     /// Builds the window on a place with a study store opened on the side.
     ///
-    /// `restore_position` and `restore_appearance` are false for the harness,
-    /// which must be deterministic, and for an explicit `BIBLE_THEME` override,
-    /// which must win over what was saved. A fresh store has no saved row, so
-    /// the current GUI defaults stay in force instead of the core defaults.
-    #[allow(clippy::too_many_arguments)]
+    /// The restoration flags in [`Startup`] are false for the harness, which
+    /// must be deterministic, and for an explicit `BIBLE_THEME` override, which
+    /// must win over what was saved. A fresh store has no saved row, so the
+    /// current GUI defaults stay in force instead of the core defaults.
     fn build(
         cc: &eframe::CreationContext<'_>,
-        theme: Theme,
-        reference: Reference,
+        startup: Startup,
         library: Library,
         translation: Arc<Translation>,
         mut status: String,
         data: &std::path::Path,
-        restore_position: bool,
-        restore_appearance: bool,
     ) -> Self {
+        let Startup {
+            theme,
+            reference,
+            restore_position,
+            restore_appearance,
+        } = startup;
         // Checked before the store creates the file, so a fresh store is
         // distinguishable from one that already holds a saved settings row.
         let had_store = data.join("study.db").exists();
