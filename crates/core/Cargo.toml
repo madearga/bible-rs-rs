@@ -24,3 +24,7 @@ sha2.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[bench]]
+name = "search"
+harness = false
