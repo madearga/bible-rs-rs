@@ -26,6 +26,7 @@ use crate::Library;
 use crate::book_picker::BookPicker;
 use crate::history::History;
 use crate::palette::{Choice, Palette as JumpPalette};
+use crate::parallel::{Column, MAX_COLUMNS, ParallelView};
 use crate::reader::Reader;
 use crate::search_panel::SearchPanel;
 use crate::selection::{self, Selection};
@@ -76,6 +77,8 @@ pub struct ReaderApp {
     flash: Option<(Reference, f64)>,
     overlay: bool,
     saved_position: Reference,
+    parallel: Option<ParallelView>,
+    translation_choices: Vec<(String, String)>,
 }
 
 impl ReaderApp {
@@ -265,6 +268,7 @@ impl ReaderApp {
             (theme, Typography::default())
         };
         theme::install(&cc.egui_ctx, theme);
+        let translation_choices = translation_choices(&library);
         Self {
             library,
             translation,
@@ -289,6 +293,8 @@ impl ReaderApp {
             flash: None,
             overlay: false,
             saved_position: start.chapter_only(),
+            parallel: None,
+            translation_choices,
         }
     }
 
@@ -317,6 +323,7 @@ impl ReaderApp {
             }
             ShotView::Shortcuts => self.overlay = true,
             ShotView::StudySidebar => self.show_demo_study_sidebar(),
+            ShotView::Parallel => self.show_demo_parallel(),
         }
     }
 
@@ -325,32 +332,39 @@ impl ReaderApp {
     /// This is the state the render harness photographs. It writes only to the
     /// store the harness opened in a scratch folder, never to a reader's data.
     fn show_demo_study_sidebar(&mut self) {
-        let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is a canonical verse");
-        let note = Reference::new(42, 3, Some(17)).expect("John 3:17 is a canonical verse");
-        let bookmark = Reference::new(42, 3, Some(18)).expect("John 3:18 is a canonical verse");
+        self.seed_demo_marks(16, 17, 18);
+        // The harness may open on a remembered place, so move the demo page to
+        // the chapter its synthetic marks belong to.
+        let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is canonical");
+        self.navigate(highlight, 0.0);
+        self.study_sidebar_open = true;
+        self.refresh_study_rows();
+    }
+
+    /// Writes one highlight, one note, and one bookmark into the store the
+    /// harness opened.
+    ///
+    /// The marks are synthetic and live only in the scratch store, never in a
+    /// reader's own data.
+    fn seed_demo_marks(&mut self, highlight: u8, note: u8, bookmark: u8) {
+        let highlight = Reference::new(42, 3, Some(highlight)).expect("John 3 is canonical");
+        let note = Reference::new(42, 3, Some(note)).expect("John 3 is canonical");
+        let bookmark = Reference::new(42, 3, Some(bookmark)).expect("John 3 is canonical");
         if let Err(error) = self
             .study
             .set_highlight(highlight, Some(HighlightColour::Yellow))
         {
-            self.status = format!("cannot seed the sidebar highlight: {error:#}");
+            self.status = format!("cannot seed the highlight: {error:#}");
         }
-        if let Err(error) = self
-            .study
-            .set_note(note, "A synthetic note for the sidebar shot")
-        {
-            self.status = format!("cannot seed the sidebar note: {error:#}");
+        if let Err(error) = self.study.set_note(note, "A synthetic note for the shot") {
+            self.status = format!("cannot seed the note: {error:#}");
         }
         if let Err(error) = self
             .study
             .set_bookmark(bookmark, Some(Bookmark::with_label("synthetic bookmark")))
         {
-            self.status = format!("cannot seed the sidebar bookmark: {error:#}");
+            self.status = format!("cannot seed the bookmark: {error:#}");
         }
-        // The harness may open on a remembered place, so move the demo page to
-        // the chapter its synthetic marks belong to.
-        self.navigate(highlight, 0.0);
-        self.study_sidebar_open = true;
-        self.refresh_study_rows();
     }
 
     /// Opens the study sidebar, or closes it when it is already open.
@@ -370,6 +384,143 @@ impl ReaderApp {
     /// Rebuilds the sidebar row cache from the store's mirror.
     fn refresh_study_rows(&mut self) {
         self.study_rows = sidebar::rows_from_snapshot(&self.study.snapshot());
+    }
+
+    /// Opens the parallel view with one synthetic mark of each kind on screen.
+    ///
+    /// This is the state the render harness photographs. Like the sidebar demo
+    /// it writes only to the store the harness opened in a scratch folder, never
+    /// to a reader's data.
+    fn show_demo_parallel(&mut self) {
+        // The verses sit near the top of the chapter, so a shot at the page's
+        // first screen shows the shared highlight and the margin note in every
+        // column rather than photographing an empty page.
+        self.seed_demo_marks(3, 4, 5);
+        let highlight = Reference::new(42, 3, Some(3)).expect("John 3:3 is a canonical verse");
+        self.navigate(highlight, 0.0);
+        self.open_parallel();
+    }
+
+    /// Shows or hides the parallel translations view.
+    ///
+    /// The single column reader is not moved while the view is open, so hiding
+    /// the view returns the reader to the exact page and offset it had.
+    pub fn toggle_parallel(&mut self) {
+        if self.parallel.is_some() {
+            self.parallel = None;
+        } else {
+            self.open_parallel();
+        }
+    }
+
+    /// Opens the parallel view at the reader's place, in the current translation
+    /// and the next two bundled ones.
+    fn open_parallel(&mut self) {
+        let mut translations = Vec::new();
+        for id in self.parallel_ids() {
+            match self.library.load(Some(&id)) {
+                Ok(translation) => translations.push(translation),
+                Err(error) => {
+                    self.status = format!("cannot open the {id} column: {error:#}");
+                    return;
+                }
+            }
+        }
+        match ParallelView::new(translations, self.reader.anchor(), self.reader.offset()) {
+            Some(view) => self.parallel = Some(view),
+            None => self.status = "parallel view needs at least two translations".to_owned(),
+        }
+    }
+
+    /// The translations the view opens with, the current one first and then the
+    /// next bundled ones in table order.
+    fn parallel_ids(&self) -> Vec<String> {
+        let current = self.translation.meta().id.clone();
+        let bundled: Vec<&str> = crate::BUNDLED_TRANSLATIONS
+            .iter()
+            .map(|entry| entry.id())
+            .collect();
+        let mut ids = vec![current.clone()];
+        let start = bundled
+            .iter()
+            .position(|id| **id == *current)
+            .map_or(0, |index| index + 1);
+        for step in 0..bundled.len() {
+            let id = bundled[(start + step) % bundled.len()];
+            if !ids.iter().any(|seen| seen == id) {
+                ids.push(id.to_owned());
+            }
+            if ids.len() == MAX_COLUMNS {
+                break;
+            }
+        }
+        // The current translation may be one the reader installed rather than
+        // one compiled in, so the list can still be short after the bundled pass.
+        for installed in self.library.installed() {
+            if ids.len() == MAX_COLUMNS {
+                break;
+            }
+            if !ids.contains(&installed.meta.id) {
+                ids.push(installed.meta.id.clone());
+            }
+        }
+        ids
+    }
+
+    /// Reads one column in another translation, which is what the column's
+    /// combobox asks for. The other columns and the shared anchor stay put.
+    pub fn set_parallel_translation(&mut self, column: usize, id: &str) -> Result<()> {
+        let translation = self.library.load(Some(id))?;
+        let Some(view) = &mut self.parallel else {
+            bail!("the parallel view is not open");
+        };
+        if !view.set_translation(column, translation) {
+            bail!("there is no parallel column {column}");
+        }
+        self.status.clear();
+        Ok(())
+    }
+
+    /// Whether the parallel translations view is on screen.
+    pub fn parallel_is_open(&self) -> bool {
+        self.parallel.is_some()
+    }
+
+    /// The columns the parallel view is showing, empty when it is closed.
+    pub fn parallel_columns(&self) -> &[Column] {
+        self.parallel.as_ref().map_or(&[], |view| view.columns())
+    }
+
+    /// The chapter the parallel view's shared anchor sits in, absent when the
+    /// view is closed.
+    pub fn parallel_anchor(&self) -> Option<Reference> {
+        self.parallel.as_ref().map(ParallelView::anchor)
+    }
+
+    /// The shared offset of the parallel view, zero when it is closed.
+    pub fn parallel_offset(&self) -> f32 {
+        self.parallel.as_ref().map_or(0.0, ParallelView::offset)
+    }
+
+    /// Scrolls the parallel view by a number of points, positive meaning down.
+    ///
+    /// The scrolled view paints on the next frame, which is what the scroll test
+    /// asserts and what the window does from the scroll wheel.
+    pub fn scroll_parallel(&mut self, delta: f32) {
+        if let Some(view) = &mut self.parallel {
+            view.scroll_by(delta);
+        }
+    }
+
+    /// The offset of the single column reader, which a test reads to prove that
+    /// parallel mode left it alone.
+    pub fn reading_offset(&self) -> f32 {
+        self.reader.offset()
+    }
+
+    /// The verse rectangles the last frame recorded, in paint order.
+    pub fn verse_rects(&self) -> &[(Reference, Rect)] {
+        &self.verse_rects
     }
 
     /// Switches the page to another translation, keeping the reading position.
@@ -496,7 +647,13 @@ impl ReaderApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(palette.paper))
-            .show(ui, |ui| self.paint_chapter(ui, palette));
+            .show(ui, |ui| {
+                if self.parallel.is_some() {
+                    self.paint_parallel(ui, palette);
+                } else {
+                    self.paint_chapter(ui, palette);
+                }
+            });
         let ctx = ui.ctx().clone();
         self.resolve_pointer(&ctx);
         self.paint_overlays(&ctx, palette);
@@ -544,6 +701,9 @@ impl ReaderApp {
                         }
                         if ui.button("Study").clicked() {
                             self.toggle_study_sidebar();
+                        }
+                        if ui.button("Parallel").clicked() {
+                            self.toggle_parallel();
                         }
                     });
                 });
@@ -705,6 +865,182 @@ impl ReaderApp {
         }
     }
 
+    /// Paints the parallel columns and records the verse rectangles so a press
+    /// in any column selects that verse for the whole view.
+    ///
+    /// Each column is laid out at the same width and painted from the one shared
+    /// offset, so a scroll moves every column together and a row's fill covers
+    /// the same verse everywhere.
+    fn paint_parallel(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        let Some(mut view) = self.parallel.take() else {
+            return;
+        };
+        self.verse_rects.clear();
+        self.hovered = None;
+
+        let ty = self.typography;
+        let columns = view.column_count();
+        let gap = 22.0;
+        let margin = 24.0;
+        let available = (ui.available_width() - margin * 2.0).max(240.0);
+        let gaps = gap * (columns.saturating_sub(1)) as f32;
+        let width = ((available - gaps) / columns as f32).max(80.0);
+        let block = width * columns as f32 + gaps;
+
+        let mut chosen: Option<(usize, String)> = None;
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.add_space(((ui.available_width() - block) * 0.5).max(0.0));
+            for index in 0..columns {
+                let Some(column) = view.columns().get(index) else {
+                    continue;
+                };
+                let current = column.id().to_owned();
+                let selected = column.abbreviation().to_owned();
+                ui.allocate_ui_with_layout(
+                    vec2(width, 22.0),
+                    egui::Layout::left_to_right(Align::Center),
+                    |ui| {
+                        egui::ComboBox::from_id_salt(("parallel-column", index))
+                            .selected_text(
+                                RichText::new(selected).font(FontId::new(12.0, theme::sans())),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (id, label) in &self.translation_choices {
+                                    if ui.selectable_label(*id == current, label).clicked() {
+                                        chosen = Some((index, id.clone()));
+                                    }
+                                }
+                            });
+                    },
+                );
+            }
+        });
+
+        ui.add_space(8.0);
+        let viewport = ui.available_height().max(120.0);
+        let scroll = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            view.scroll_by(-scroll);
+        }
+        let ctx = ui.ctx().clone();
+        let measure = typography::EguiMeasure::new(&ctx, ty);
+        let grid = view.frame(&ty, width, &measure);
+        let offset = grid.offset;
+        let selection = self.selection;
+        let flash = self.flash;
+        let now = ctx.input(|input| input.time);
+
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), viewport), egui::Sense::hover());
+        let left = rect.min.x + ((rect.width() - block) * 0.5).max(0.0);
+        let top = rect.min.y;
+        let hover = ctx.pointer_hover_pos();
+        let mut rects: Vec<(Reference, Rect)> = Vec::new();
+        let mut hovered = None;
+        for column in 0..columns {
+            let x = left + column as f32 * (width + gap);
+            let Some(layout) = grid.layouts().get(column) else {
+                continue;
+            };
+            if column > 0 {
+                let rule = x - gap * 0.5;
+                ui.painter().line_segment(
+                    [pos2(rule, top), pos2(rule, top + viewport)],
+                    Stroke::new(1.0, palette.rule),
+                );
+            }
+            for (row_index, row) in grid.rows.iter().enumerate() {
+                let Some(row_top) = grid.row_top(row_index, offset) else {
+                    continue;
+                };
+                if row_top > viewport || row_top + row.height < 0.0 {
+                    continue;
+                }
+                let cell_rect =
+                    Rect::from_min_size(pos2(x, top + row_top), vec2(width, row.height));
+                if selection.contains(row.reference) {
+                    ui.painter().rect_filled(cell_rect, 2.0, palette.selection);
+                }
+                if let Some((flash, until)) = flash
+                    && flash == row.reference
+                    && now < until
+                {
+                    ui.painter()
+                        .rect_filled(cell_rect, 2.0, palette.accent.gamma_multiply(0.28));
+                }
+                let markers = sidebar::margin_markers(&self.study, row.reference);
+                if markers.note {
+                    ui.painter().circle_filled(
+                        pos2(x - 8.0, top + row_top + row.height * 0.5),
+                        2.5,
+                        palette.accent,
+                    );
+                }
+                if markers.bookmark {
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(
+                            pos2(x - 5.0, top + row_top + row.height * 0.25),
+                            vec2(2.0, row.height * 0.5),
+                        ),
+                        1.0,
+                        palette.muted,
+                    );
+                }
+                rects.push((row.reference, cell_rect));
+                if hover.is_some_and(|position| cell_rect.contains(position)) {
+                    hovered = Some(row.reference);
+                }
+
+                let Some(cell) = row.cells.get(column) else {
+                    continue;
+                };
+                let Some(first) = layout.lines.get(cell.start) else {
+                    continue;
+                };
+                let block_top = first.top;
+                for line_index in cell.clone() {
+                    let line = &layout.lines[line_index];
+                    let line_top = top + row_top + (line.top - block_top);
+                    if line_top > top + viewport || line_top + line.height < top {
+                        continue;
+                    }
+                    for run in &line.runs {
+                        ui.painter().text(
+                            pos2(x + run.x, line_top + (run.top - line.top)),
+                            egui::Align2::LEFT_TOP,
+                            &run.text,
+                            typography::font_id(run.role, &ty),
+                            run.role.color(&ty, &palette),
+                        );
+                    }
+                }
+                if hovered == Some(row.reference) {
+                    ui.painter().rect_stroke(
+                        cell_rect,
+                        2.0,
+                        Stroke::new(1.0, palette.rule),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+
+        self.verse_rects = rects;
+        self.hovered = hovered;
+        self.reference = view.anchor();
+        self.parallel = Some(view);
+        if self.reference.chapter_only() != self.saved_position {
+            self.remember(self.reference);
+        }
+        if let Some((column, id)) = chosen
+            && let Err(error) = self.set_parallel_translation(column, &id)
+        {
+            self.status = format!("{error:#}");
+        }
+    }
+
     /// Turns a pointer press into a selected verse and the J and K keys into a
     /// one-verse move.
     ///
@@ -783,6 +1119,9 @@ impl ReaderApp {
         self.selection.select(reference);
         self.reference = reference.chapter_only();
         self.reader.set_position(reference.chapter_only());
+        if let Some(view) = &mut self.parallel {
+            view.set_reference(reference.chapter_only());
+        }
         self.history.visit(reference.chapter_only());
         self.flash = Some((reference, now + 0.9));
         self.remember(reference);
@@ -793,6 +1132,9 @@ impl ReaderApp {
         self.selection.select(reference);
         self.reference = reference.chapter_only();
         self.reader.set_position(reference.chapter_only());
+        if let Some(view) = &mut self.parallel {
+            view.set_reference(reference.chapter_only());
+        }
         self.flash = Some((reference, now + 0.9));
         self.remember(reference);
     }
@@ -868,6 +1210,11 @@ impl ReaderApp {
 
     /// Runs the keyboard shortcuts that are not owned by an open panel.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Escape leaves the parallel view. The key is checked before the table
+        // because it is a way out of a mode, not an action with a key of its own.
+        if self.parallel.is_some() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.parallel = None;
+        }
         if self.palette.is_open() || self.search.is_open() || self.picker.is_open() {
             return;
         }
@@ -987,6 +1334,7 @@ impl ReaderApp {
             Action::Copy => self.apply_menu(MenuAction::Copy, ctx),
             Action::CopyWithReference => self.apply_menu(MenuAction::CopyWithReference, ctx),
             Action::Compare => self.compare_selected(),
+            Action::ToggleParallel => self.toggle_parallel(),
             Action::ExportMarkdown => {
                 let path = crate::data_dir().join("study.md");
                 match std::fs::write(&path, self.study.export_markdown()) {
@@ -1351,6 +1699,8 @@ pub enum ShotView {
     Shortcuts,
     /// The study sidebar, with one synthetic mark of each kind.
     StudySidebar,
+    /// The parallel translations view, with one synthetic mark of each kind.
+    Parallel,
 }
 
 impl ShotView {
@@ -1363,6 +1713,7 @@ impl ShotView {
             "menu" | "verse-menu" => Some(Self::VerseMenu),
             "shortcuts" | "overlay" => Some(Self::Shortcuts),
             "sidebar" | "study-sidebar" => Some(Self::StudySidebar),
+            "parallel" => Some(Self::Parallel),
             _ => None,
         }
     }
@@ -1423,7 +1774,7 @@ impl ShotSpec {
     /// - `SHOT_TRANSLATION` is a translation id, or `sample` for the synthetic
     ///   page the harness uses as a baseline.
     /// - `SHOT_DEMO` opens `palette`, `search`, `picker`, `menu`, `shortcuts`,
-    ///   or `sidebar`.
+    ///   `sidebar`, or `parallel`.
     /// - `SHOT_CLICK` and `SHOT_HOVER` are `X,Y` points in points.
     /// - `SHOT_PAUSE` is a wait in milliseconds before the picture.
     /// - `SHOT_FILMSTRIP` is the number of frames to write.
@@ -1515,10 +1866,10 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
     let reference = spec.reference;
     let translation = spec.translation.clone();
     let view = spec.view;
-    // The sidebar demo writes study marks, so it must open a store in a scratch
-    // folder rather than the one a reader has on this machine.
-    let sidebar_data = match view {
-        Some(ShotView::StudySidebar) => Some(shot_scratch_dir()?),
+    // The sidebar and parallel demos write study marks, so they must open a
+    // store in a scratch folder rather than the one a reader has on this machine.
+    let scratch_data = match view {
+        Some(ShotView::StudySidebar | ShotView::Parallel) => Some(shot_scratch_dir()?),
         _ => None,
     };
     let mut harness = egui_kittest::Harness::builder()
@@ -1526,7 +1877,7 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
         .with_pixels_per_point(1.0)
         .wgpu()
         .build_eframe(move |cc| {
-            let mut app = match &sidebar_data {
+            let mut app = match &scratch_data {
                 Some(data) => ReaderApp::open_at(cc, theme, reference, data),
                 None => {
                     ReaderApp::open_with_translation(cc, theme, reference, translation.as_deref())
@@ -1619,6 +1970,33 @@ fn parse_point(input: &str) -> Result<Pos2> {
             .parse()
             .context("the y coordinate is not a number")?,
     ))
+}
+
+/// The translations a column header can switch to, in menu order.
+///
+/// The bundled translations come first, because they are always available, and
+/// an installed translation of the same identifier replaces its bundled entry
+/// in the library rather than appearing twice.
+fn translation_choices(library: &Library) -> Vec<(String, String)> {
+    let mut choices: Vec<(String, String)> = crate::BUNDLED_TRANSLATIONS
+        .iter()
+        .filter_map(|bundled| bundled.meta().ok())
+        .map(|meta| {
+            (
+                meta.id.clone(),
+                format!("{} ({})", meta.abbreviation, meta.name),
+            )
+        })
+        .collect();
+    for installed in library.installed() {
+        if !choices.iter().any(|(id, _)| *id == installed.meta.id) {
+            choices.push((
+                installed.meta.id.clone(),
+                format!("{} ({})", installed.meta.abbreviation, installed.meta.name),
+            ));
+        }
+    }
+    choices
 }
 
 /// Maps a saved settings row onto the reader's theme and typography.
