@@ -116,6 +116,14 @@ pub enum Action {
     TextSmaller,
     /// Return the text size to its default.
     TextDefault,
+    /// Show or hide verse numbers.
+    ToggleVerseNumbers,
+    /// Show or hide section headings.
+    ToggleHeadings,
+    /// Show or hide the keyboard shortcut overlay.
+    ShowShortcuts,
+    /// Show where the reading preferences live.
+    Preferences,
 }
 
 impl Action {
@@ -151,6 +159,10 @@ impl Action {
             Self::TextLarger => "Larger text",
             Self::TextSmaller => "Smaller text",
             Self::TextDefault => "Default text size",
+            Self::ToggleVerseNumbers => "Toggle verse numbers",
+            Self::ToggleHeadings => "Toggle section headings",
+            Self::ShowShortcuts => "Keyboard shortcuts",
+            Self::Preferences => "Settings",
         }
     }
 }
