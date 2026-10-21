@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, bail};
 use bible_core::format::{self, MAGIC};
 use bible_core::study::Store;
-use bible_core::{Reference, Translation, TranslationBuilder, TranslationMeta, books};
+use bible_core::{
+    ImportFormat, Reference, Translation, TranslationBuilder, TranslationMeta, books, import_with,
+};
 
 use crate::{BUNDLED_TRANSLATIONS, Library, check_translation_id, data_dir};
 
@@ -31,7 +33,11 @@ verbs:
   read <reference> [--translation <id>]   print a verse or a chapter
   search <query> [--translation <id>] [--limit <n>]
                                           print the verses a query matches
-  import <path> [--id <id>]               install a translation file
+  import <path> [--id <id>] [--abbreviation <text>] [--name <text>]
+         [--language <text>] [--licence <text>] [--copyright <text>]
+         [--provenance <text>] [--unlock-key <key>]
+                                          install a USFM, OSIS, Zefania, SWORD,
+                                          binary, or text translation
   translations                            list the translations
   export <path> [--format json|markdown]  write the study data out
   import-study <path>                     read exported study data back
@@ -230,9 +236,11 @@ fn translations(library: &Library) -> Result<()> {
 
 /// Installs a translation file into the data folder.
 ///
-/// A binary translation is decoded and re-encoded so a corrupt file is rejected
-/// before it lands in the library. A text file in the documented
-/// `Reference<TAB>text` form is converted onto the canonical grid first.
+/// The app's own binary format is decoded and re-encoded so a corrupt file is
+/// rejected before it lands in the library. A USFM, OSIS, Zefania, or SWORD
+/// source is handed to the core importer that matches it, which keeps the
+/// archive bounds the core already enforces. Anything else is read as the
+/// documented `Reference<TAB>text` form.
 fn import(
     library: &mut Library,
     positional: &[String],
@@ -242,31 +250,119 @@ fn import(
         return Err(UsageError("import needs a file path".to_owned()).into());
     };
     let path = PathBuf::from(path);
-    let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    let translation = if bytes.starts_with(&MAGIC) {
-        format::decode(&bytes)
-            .with_context(|| format!("{} is not a translation", path.display()))?
+    if !path.exists() {
+        bail!("cannot read {}: no such file or folder", path.display());
+    }
+
+    let (translation, source) = if is_binary_translation(&path)? {
+        let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let translation = format::decode(&bytes)
+            .with_context(|| format!("{} is not a translation", path.display()))?;
+        (translation, "binary".to_owned())
+    } else if let Some(format) = ImportFormat::detect(&path) {
+        let meta = import_meta(&path, flags)?;
+        let unlock_key = flags.get("unlock-key").map(String::as_str);
+        let label = format_name(format).to_owned();
+        let translation = import_with(format, &path, meta, unlock_key)
+            .with_context(|| format!("cannot import {} as {label}", path.display()))?;
+        (translation, label)
     } else {
-        let source = String::from_utf8(bytes)
-            .with_context(|| format!("{} is neither binary nor UTF-8 text", path.display()))?;
-        let id = match flags.get("id") {
-            Some(id) => id.clone(),
-            None => path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "imported".to_owned()),
-        };
+        let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let text = String::from_utf8(bytes).with_context(|| {
+            format!(
+                "{} is not a USFM, OSIS, Zefania, or SWORD source, a translation, or UTF-8 text",
+                path.display()
+            )
+        })?;
+        let id = flags
+            .get("id")
+            .cloned()
+            .unwrap_or_else(|| default_id(&path));
         check_translation_id(&id).with_context(|| format!("cannot import {}", path.display()))?;
-        parse_text(&source, &id, &path)?
+        let translation = parse_text(&text, &id, &path)?;
+        (translation, "text".to_owned())
     };
+
     let installed = library.install(&translation)?;
     println!(
-        "installed {} ({} verses) at {}",
+        "installed {} ({} verses) from {} at {}",
         translation.meta().id,
         translation.verses().len(),
+        source,
         installed.display()
     );
     Ok(())
+}
+
+/// Whether `path` is a file whose first bytes name the app's binary format.
+///
+/// A folder is never binary, and a file shorter than the four byte magic cannot
+/// be one either, so the check reads only the header rather than the whole body.
+fn is_binary_translation(path: &Path) -> Result<bool> {
+    use std::io::Read;
+
+    if path.is_dir() {
+        return Ok(false);
+    }
+    let mut file =
+        fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) => Ok(magic == MAGIC),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// The label a report uses for one import format.
+fn format_name(format: ImportFormat) -> &'static str {
+    match format {
+        ImportFormat::Usfm => "USFM",
+        ImportFormat::Osis => "OSIS",
+        ImportFormat::Zefania => "Zefania",
+        ImportFormat::Sword => "SWORD",
+    }
+}
+
+/// Builds the metadata a core importer needs from the caller's flags.
+///
+/// The caller's flags win, so an import can never silently claim a different id
+/// or licence than the one supplied. The book titles are left empty on purpose,
+/// so the importer takes the titles the source itself states. A caller that
+/// supplies no licence gets `Unknown` rather than a public domain claim.
+fn import_meta(path: &Path, flags: &BTreeMap<String, String>) -> Result<TranslationMeta> {
+    let id = flags.get("id").cloned().unwrap_or_else(|| default_id(path));
+    let name = flags.get("name").cloned().unwrap_or_else(|| id.clone());
+    let mut meta = TranslationMeta::new(id.clone(), name);
+    meta.abbreviation = flags
+        .get("abbreviation")
+        .cloned()
+        .unwrap_or_else(|| id.to_uppercase());
+    meta.language = flags
+        .get("language")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_owned());
+    meta.licence = flags
+        .get("licence")
+        .or_else(|| flags.get("license"))
+        .cloned()
+        .unwrap_or_else(|| "Unknown".to_owned());
+    meta.copyright = flags.get("copyright").cloned().unwrap_or_default();
+    meta.provenance = flags
+        .get("provenance")
+        .cloned()
+        .unwrap_or_else(|| path.display().to_string());
+    meta.origin = "imported".to_owned();
+    Ok(meta)
+}
+
+/// The identifier an import uses when the caller names none, taken from the
+/// file stem or the folder name and never from the whole path.
+fn default_id(path: &Path) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imported".to_owned())
 }
 
 /// Builds a full-grid translation from `Reference<TAB>text` lines.
