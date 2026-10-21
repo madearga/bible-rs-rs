@@ -24,7 +24,7 @@
 mod export;
 pub mod record;
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -107,6 +107,19 @@ impl Store {
     /// has to wait on a query.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        // A first run has no data folder yet, and the lock file lives beside the
+        // database, so the folder has to exist before the lock is opened. A bare
+        // file name has no parent to create and writes to the current directory.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            create_dir_all(parent).with_context(|| {
+                format!(
+                    "could not create the study store folder at {}",
+                    parent.display()
+                )
+            })?;
+        }
         let lock_path = lock_path(path);
         let lock = OpenOptions::new()
             .read(true)
