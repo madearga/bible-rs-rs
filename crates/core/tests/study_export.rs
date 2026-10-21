@@ -160,3 +160,47 @@ fn an_empty_store_exports_cleanly() {
     target.import_json(&json).expect("an empty export imports");
     assert_eq!(target.snapshot(), store.snapshot());
 }
+
+#[test]
+fn the_export_carries_the_paragraph_mode() {
+    let mut store = Store::open_in_memory().expect("the store opens");
+    let mut settings = store.settings().clone();
+    settings.paragraph_mode = false;
+    store.set_settings(settings).expect("the settings are set");
+
+    let json = store.export_json().expect("the export is written");
+    assert!(
+        json.contains("\"paragraph_mode\": false"),
+        "the export should name the paragraph mode"
+    );
+
+    let mut target = Store::open_in_memory().expect("the target store opens");
+    target.import_json(&json).expect("the export imports");
+    assert!(!target.settings().paragraph_mode);
+}
+
+#[test]
+fn an_export_without_the_paragraph_mode_imports_with_the_default() {
+    let mut source = Store::open_in_memory().expect("the source store opens");
+    source
+        .set_settings(source.settings().clone())
+        .expect("the settings are set");
+    let json = source.export_json().expect("the export is written");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&json).expect("the export is JSON");
+    document["settings"]
+        .as_object_mut()
+        .expect("the settings are an object")
+        .remove("paragraph_mode");
+    let without = serde_json::to_string(&document).expect("the document is written");
+    assert!(!without.contains("paragraph_mode"));
+
+    let mut target = Store::open_in_memory().expect("the target store opens");
+    target
+        .import_json(&without)
+        .expect("an export from before the field still imports");
+    assert!(
+        target.settings().paragraph_mode,
+        "a missing field should fall back to the default"
+    );
+}

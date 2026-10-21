@@ -292,3 +292,43 @@ fn a_note_round_trips_through_a_snapshot() {
     );
     assert_eq!(data.highlights, vec![(verse, HighlightColour::Purple)]);
 }
+
+#[test]
+fn a_fresh_settings_row_is_in_paragraph_mode() {
+    assert!(
+        Settings::default().paragraph_mode,
+        "a fresh store should flow verses inside paragraphs"
+    );
+}
+
+#[test]
+fn a_settings_row_written_before_the_field_keeps_paragraph_mode_on() {
+    let db = TempDb::new("legacy-paragraph");
+    {
+        let mut store = Store::open(db.path()).expect("the store opens");
+        let mut settings = store.settings().clone();
+        settings.theme = Theme::Dark;
+        settings.text_size = 21.0;
+        store.set_settings(settings).expect("the settings are set");
+        store.close().expect("the settings row is written");
+    }
+
+    // Rewrite the row in the shape the store wrote before paragraph_mode
+    // existed. The other fields are untouched, so only the missing field can
+    // explain a changed reader.
+    let old_row = r#"{"position":{"book":0,"chapter":1,"verse":1},"theme":"dark","text_size":21.0,"line_spacing":1.62,"line_length":34.0,"justify":false,"show_verse_numbers":true,"show_headings":true,"words_of_christ_red":true}"#;
+    let connection = rusqlite::Connection::open(db.path()).expect("the database opens");
+    connection
+        .execute(
+            "UPDATE settings SET json = ?1 WHERE id = 1",
+            rusqlite::params![old_row],
+        )
+        .expect("the legacy row is written");
+    drop(connection);
+
+    let store = Store::open(db.path()).expect("the store reopens");
+    let settings = store.settings().clone();
+    assert!(settings.paragraph_mode, "the missing field keeps the default");
+    assert_eq!(settings.theme, Theme::Dark, "the other fields are preserved");
+    assert_eq!(settings.text_size, 21.0);
+}
