@@ -102,6 +102,12 @@ pub enum Action {
     CopyWithReference,
     /// Compare the selected verse across translations.
     Compare,
+    /// Show or hide the parallel translations view.
+    ///
+    /// The action is in the enum so the menu bar can reach it, and it has no key
+    /// in the shortcut table on purpose. Command-P sits next to command-F and is
+    /// read as print, which is the wrong thing to guess at for this action.
+    ToggleParallel,
     /// Export the study data as Markdown.
     ExportMarkdown,
     /// Export the study data as JSON.
@@ -116,6 +122,14 @@ pub enum Action {
     TextSmaller,
     /// Return the text size to its default.
     TextDefault,
+    /// Show or hide verse numbers.
+    ToggleVerseNumbers,
+    /// Show or hide section headings.
+    ToggleHeadings,
+    /// Show or hide the keyboard shortcut overlay.
+    ShowShortcuts,
+    /// Show where the reading preferences live.
+    Preferences,
 }
 
 impl Action {
@@ -144,6 +158,7 @@ impl Action {
             Self::Copy => "Copy verse",
             Self::CopyWithReference => "Copy verse with reference",
             Self::Compare => "Compare translations",
+            Self::ToggleParallel => "Parallel translations",
             Self::ExportMarkdown => "Export study data as Markdown",
             Self::ExportJson => "Export study data as JSON",
             Self::ToggleRedLetter => "Toggle words of Christ in red",
@@ -151,6 +166,10 @@ impl Action {
             Self::TextLarger => "Larger text",
             Self::TextSmaller => "Smaller text",
             Self::TextDefault => "Default text size",
+            Self::ToggleVerseNumbers => "Toggle verse numbers",
+            Self::ToggleHeadings => "Toggle section headings",
+            Self::ShowShortcuts => "Keyboard shortcuts",
+            Self::Preferences => "Settings",
         }
     }
 }
