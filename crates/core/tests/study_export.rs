@@ -203,3 +203,63 @@ fn an_export_without_the_paragraph_mode_imports_with_the_default() {
         "a missing field should fall back to the default"
     );
 }
+
+#[test]
+fn an_exported_text_size_outside_the_interface_range_is_refused() {
+    let source = Store::open_in_memory().expect("the source store opens");
+    let json = source.export_json().expect("the export is written");
+    assert!(json.contains("\"text_size\": 17.0"), "{json}");
+
+    for bad in ["-5.0", "0.0", "200.0"] {
+        let document = json.replace("\"text_size\": 17.0", &format!("\"text_size\": {bad}"));
+        let mut target = Store::open_in_memory().expect("the target store opens");
+        let error = target
+            .import_json(&document)
+            .expect_err("an out of range text size is refused");
+        assert!(
+            error.to_string().contains("text size"),
+            "the error names the field: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn an_exported_line_spacing_outside_the_interface_range_is_refused() {
+    let source = Store::open_in_memory().expect("the source store opens");
+    let json = source.export_json().expect("the export is written");
+
+    for (field, default, value) in [
+        ("line_spacing", "1.62", "-1.0"),
+        ("line_spacing", "1.62", "9.0"),
+        ("line_length", "34.0", "4.0"),
+        ("line_length", "34.0", "500.0"),
+    ] {
+        let document = json.replace(
+            &format!("\"{field}\": {default}"),
+            &format!("\"{field}\": {value}"),
+        );
+        let mut target = Store::open_in_memory().expect("the target store opens");
+        assert!(
+            target.import_json(&document).is_err(),
+            "{field} {value} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_settings_document_without_paragraph_mode_keeps_the_default() {
+    let source = Store::open_in_memory().expect("the source store opens");
+    let json = source.export_json().expect("the export is written");
+    let mut document: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    document["settings"]
+        .as_object_mut()
+        .expect("the settings are an object")
+        .remove("paragraph_mode");
+    let document = serde_json::to_string(&document).expect("the document is written");
+
+    let mut target = Store::open_in_memory().expect("the target store opens");
+    target
+        .import_json(&document)
+        .expect("a document without the field still loads");
+    assert!(target.settings().paragraph_mode, "the default stays on");
+}

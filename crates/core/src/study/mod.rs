@@ -120,7 +120,11 @@ impl Store {
                 )
             })?;
         }
-        let lock_path = lock_path(path);
+        // Two spellings of one database must take one lock, so the database path
+        // is resolved before the sidecar name is derived from it. An existing
+        // link to the database therefore shares the lock of its target.
+        let path = resolve_database_path(path)?;
+        let lock_path = lock_path(&path);
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -139,7 +143,7 @@ impl Store {
                 path.display()
             )
         })?;
-        let connection = Connection::open(path)
+        let connection = Connection::open(&path)
             .with_context(|| format!("could not open the study store at {}", path.display()))?;
         Self::from_connection(connection, Some(lock))
     }
@@ -480,6 +484,28 @@ impl Store {
     pub fn close(mut self) -> Result<()> {
         self.flush()
     }
+}
+
+/// Resolves a database path to one spelling, following an existing link.
+///
+/// When the database does not exist yet, its parent is resolved and the file
+/// name is joined onto that, so a relative spelling and an absolute one still
+/// agree. A bare file name resolves against the current folder.
+fn resolve_database_path(database: &Path) -> Result<PathBuf> {
+    if let Ok(resolved) = database.canonicalize() {
+        return Ok(resolved);
+    }
+    let name = database
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no file name", database.display()))?;
+    let parent = match database.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let parent = parent
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", parent.display()))?;
+    Ok(parent.join(name))
 }
 
 /// Returns the separate file used to lock a file-backed store for its lifetime.

@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -219,11 +219,52 @@ enum Store {
     Disk(PathBuf),
 }
 
+/// Whether a path stays inside the module it is used from.
+///
+/// Only normal components and the current-folder component are accepted, so an
+/// absolute path, a parent traversal, and a platform prefix are all refused
+/// before they are joined onto the module root.
+fn is_safe_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+/// Resolves a module file under the module root and verifies it stays there.
+///
+/// Returns `None` when the module does not hold the file. A path that is not
+/// relative, or that resolves outside the root through a link, is an error.
+fn resolve_module_file(root: &Path, name: &str) -> Result<Option<PathBuf>> {
+    let relative = Path::new(name);
+    if !is_safe_relative(relative) {
+        bail!("the module path {name:?} is not a relative path inside the module");
+    }
+    let candidate = root.join(relative);
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let resolved = candidate
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", candidate.display()))?;
+    if !resolved.starts_with(root) {
+        bail!(
+            "the module path {name:?} resolves outside the module root at {}",
+            resolved.display()
+        );
+    }
+    Ok(Some(resolved))
+}
+
 impl Store {
     /// Opens a module that is a zip, a folder, or a manifest file.
     fn open(path: &Path) -> Result<Self> {
         if path.is_dir() {
-            return Ok(Self::Disk(module_root(path)?));
+            let root = module_root(path)?;
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("cannot resolve the module root {}", root.display()))?;
+            return Ok(Self::Disk(root));
         }
         if path
             .extension()
@@ -233,7 +274,10 @@ impl Store {
                 .parent()
                 .and_then(Path::parent)
                 .with_context(|| format!("{} is not inside a mods.d folder", path.display()))?;
-            return Ok(Self::Disk(root.to_path_buf()));
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("cannot resolve the module root {}", root.display()))?;
+            return Ok(Self::Disk(root));
         }
 
         let entries = zip::read_archive(path)?;
@@ -254,10 +298,9 @@ impl Store {
         match self {
             Self::Memory(files) => Ok(files.get(&name.to_ascii_lowercase()).cloned()),
             Self::Disk(root) => {
-                let path = root.join(name);
-                if !path.is_file() {
+                let Some(path) = resolve_module_file(root, name)? else {
                     return Ok(None);
-                }
+                };
                 Ok(Some(std::fs::read(&path).with_context(|| {
                     format!("cannot read {}", path.display())
                 })?))
@@ -295,8 +338,14 @@ fn collect_files(directory: &Path, prefix: &str, found: &mut Vec<String>) {
             "{prefix}{}",
             entry.file_name().to_string_lossy().to_ascii_lowercase()
         );
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_files(&path, &format!("{name}/"), found);
         } else {
             found.push(name);
@@ -409,6 +458,9 @@ impl Manifest {
                     .to_string()
             })
             .unwrap_or_else(|| guess_data_path(store, &name));
+        if !is_safe_relative(Path::new(&data_path)) {
+            bail!("the module DataPath {data_path:?} is not a relative path inside the module");
+        }
 
         let compression = entries
             .get("CompressType")
@@ -528,8 +580,12 @@ impl Manifest {
                         record.block
                     );
                 }
-                let end = end.min(body.len() as u32);
-                let start = start.min(end);
+                if end as usize > body.len() {
+                    bail!(
+                        "block {} runs past the end of the compressed data",
+                        record.block
+                    );
+                }
                 let slice = &body[start as usize..end as usize];
                 let mut decoded = Vec::new();
                 flate2::read::ZlibDecoder::new(slice)
@@ -547,10 +603,17 @@ impl Manifest {
             }
             let block = blocks.get(&record.block).unwrap_or(&empty);
             let start = record.offset as usize;
-            let end = start
-                .saturating_add(record.length as usize)
-                .min(block.len());
-            let slice = block.get(start..end).unwrap_or_default();
+            let end = start.checked_add(record.length as usize).with_context(|| {
+                format!("verse index record in block {} overflows", record.block)
+            })?;
+            if end > block.len() {
+                bail!(
+                    "verse index record points past the end of block {} at {start} plus {} bytes",
+                    record.block,
+                    record.length
+                );
+            }
+            let slice = &block[start..end];
             budget.take_text(slice.len())?;
             texts.push(decode_text(slice).unwrap_or_default());
         }

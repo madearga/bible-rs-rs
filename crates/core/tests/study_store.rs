@@ -403,3 +403,28 @@ fn a_settings_row_written_before_the_field_keeps_paragraph_mode_on() {
     );
     assert_eq!(settings.text_size, 21.0);
 }
+
+#[cfg(unix)]
+#[test]
+fn two_spellings_of_one_database_take_one_lock() {
+    let db = TempDb::new("lock-identity");
+    Store::open(db.path())
+        .expect("the database is created")
+        .close()
+        .expect("the store closes");
+    let alias = db
+        .path()
+        .parent()
+        .expect("the database has a folder")
+        .join("alias-lock-identity.db");
+    let _ = std::fs::remove_file(&alias);
+    std::os::unix::fs::symlink(db.path(), &alias).expect("the alias link is created");
+
+    let held = Store::open(db.path()).expect("the first spelling opens");
+    let error = Store::open(&alias)
+        .err()
+        .expect("the other spelling of the same database is rejected");
+    assert!(error.to_string().contains("busy"), "{error:#}");
+    held.close().expect("the store closes");
+    Store::open(&alias).expect("the alias opens once the lock is released");
+}

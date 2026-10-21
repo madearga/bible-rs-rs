@@ -198,3 +198,88 @@ fn a_metadata_length_past_the_limit_is_refused() {
         "{error:#}"
     );
 }
+
+#[test]
+fn a_data_path_that_traverses_upward_is_refused() {
+    let scratch = Scratch::new("data-path-parent");
+    let conf = "[Synthetic]\nDataPath=../../outside/\nModDrv=zText\nCompressType=ZIP\n";
+    scratch.write("mods.d/synthetic.conf", conf.as_bytes());
+
+    let error = imported(&scratch.path).expect_err("a traversing DataPath is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("DataPath"), "{message}");
+    assert!(message.contains("relative"), "{message}");
+}
+
+#[test]
+fn an_absolute_data_path_is_refused() {
+    let scratch = Scratch::new("data-path-absolute");
+    let conf = "[Synthetic]\nDataPath=/tmp/outside/\nModDrv=zText\nCompressType=ZIP\n";
+    scratch.write("mods.d/synthetic.conf", conf.as_bytes());
+
+    let error = imported(&scratch.path).expect_err("an absolute DataPath is refused");
+    assert!(format!("{error:#}").contains("DataPath"), "{error:#}");
+}
+
+#[test]
+fn a_verse_record_past_its_block_is_refused() {
+    let scratch = Scratch::new("record-offset");
+    write_manifest(&scratch);
+
+    let compressed = deflate(b"Alpha");
+    // The record starts two bytes in and claims a hundred, past a five byte block.
+    let index = verse_record(0, 2, 100);
+    let sizes = block_record(compressed.len() as u32, 5);
+    write_ztext(&scratch, &index, &compressed, &sizes);
+
+    let error = imported(&scratch.path).expect_err("the record is not clamped");
+    let message = format!("{error:#}");
+    assert!(message.contains("past the end of block"), "{message}");
+    assert!(message.contains('0'), "{message}");
+}
+
+#[test]
+fn a_source_file_past_the_size_limit_is_refused() {
+    let scratch = Scratch::new("source-size");
+    let path = scratch.path.join("huge.usfm");
+    let file = std::fs::File::create(&path).expect("create the source");
+    file.set_len(65 * 1024 * 1024).expect("set the length");
+    drop(file);
+
+    let error = bible_core::import_path(&path, TranslationMeta::new("x", "X"), None)
+        .expect_err("a source past the size limit is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("limit for one source file"), "{message}");
+}
+
+#[test]
+fn xml_that_nests_past_the_depth_limit_is_refused() {
+    let mut xml = String::from("<osis>");
+    for _ in 0..300 {
+        xml.push_str("<div>");
+    }
+    xml.push_str("</osis>");
+
+    let error = bible_core::import_osis(&xml, TranslationMeta::new("x", "X"))
+        .expect_err("deep nesting is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("nests deeper"), "{message}");
+}
+
+#[test]
+fn a_verse_stops_at_the_representable_text_limit() {
+    let scratch = Scratch::new("verse-text");
+    let path = scratch.path.join("long.usfm");
+    let word = "a".repeat(1_000);
+    let line = vec![word.as_str(); 100].join(" ");
+    let source = format!("\\id GEN\n\\c 1\n\\v 1 {line}\n");
+    scratch.write("long.usfm", source.as_bytes());
+
+    let translation = bible_core::import_path(&path, TranslationMeta::new("x", "X"), None)
+        .expect("the verse is imported with the bound applied");
+    let verse = translation.verse_at(0, 1, 1).expect("the verse exists");
+    assert!(
+        translation.verse_text(verse).len() <= 65_535,
+        "the accumulated text stops at the u16 limit"
+    );
+}
