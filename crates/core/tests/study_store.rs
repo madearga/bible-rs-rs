@@ -47,6 +47,38 @@ impl Drop for TempDb {
     }
 }
 
+/// A folder tree in the system temporary folder that is removed when the test
+/// ends, used where the test has to watch a folder be created.
+struct TempFolder {
+    root: PathBuf,
+}
+
+impl TempFolder {
+    /// Reserves a folder path no other test in this run will pick, without
+    /// creating the folder itself.
+    fn new(test: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "bib-core-study-{}-{test}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        Self { root }
+    }
+
+    /// The folder path itself, which is not created until the store is opened.
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 /// A verse reference in the middle of the canon, so the test is not reading slot 0.
 fn sample_verse() -> Reference {
     Reference::parse("John 3:16").expect("the reference resolves")
@@ -55,6 +87,38 @@ fn sample_verse() -> Reference {
 /// A second verse, used where a test needs two records side by side.
 fn other_verse() -> Reference {
     Reference::parse("Ps 23:1").expect("the reference resolves")
+}
+
+#[test]
+fn a_store_opens_in_a_folder_that_does_not_exist_yet() {
+    let folder = TempFolder::new("missing-parent");
+    let path = folder
+        .root()
+        .join("nested")
+        .join("data")
+        .join("study.sqlite");
+    assert!(
+        !folder.root().exists(),
+        "the test starts with no data folder at all"
+    );
+
+    let mut store = Store::open(&path).expect("the store creates its folder and opens");
+    store
+        .set_note(sample_verse(), "written into a new folder")
+        .expect("the note is written");
+    store.close().expect("the store closes");
+
+    assert!(
+        folder.root().is_dir(),
+        "opening the store creates the parent folder of the database"
+    );
+    assert!(path.is_file(), "the database file itself is created");
+
+    let store = Store::open(&path).expect("the store reopens from the new folder");
+    assert_eq!(
+        store.note(sample_verse()),
+        Some("written into a new folder")
+    );
 }
 
 #[test]
