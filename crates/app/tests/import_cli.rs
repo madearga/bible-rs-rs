@@ -525,7 +525,10 @@ fn an_identifier_cannot_leave_the_translations_folder() {
     std::fs::write(&source, usfm_document()).expect("the source");
 
     let message = assert_refused(&dir, &source, &["--id", "../../escape"]);
-    assert!(message.contains("plain file name"), "{message}");
+    assert!(
+        message.contains("only ASCII letters, digits, underscore, and hyphen"),
+        "{message}"
+    );
     assert!(!dir.join("escape.bbl").exists());
 }
 

@@ -22,6 +22,7 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -35,6 +36,30 @@ mod usfm;
 mod zefania;
 
 pub mod zip;
+
+/// The largest source file one import reads, in bytes.
+const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The largest total of source bytes one import reads, in bytes.
+const MAX_SOURCE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+
+/// The most source files one import reads.
+const MAX_SOURCE_FILES: usize = 256;
+
+/// The largest verse text the model can store, in bytes.
+///
+/// The format keeps a `u16` length per verse, so text past this cannot be
+/// represented. The accumulator stops there rather than growing without bound.
+pub(crate) const MAX_VERSE_TEXT_BYTES: usize = u16::MAX as usize;
+
+/// The deepest XML element nesting an import accepts.
+const MAX_XML_DEPTH: usize = 256;
+
+/// The most structural breaks one verse may carry.
+const MAX_VERSE_MARKS: usize = 1024;
+
+/// The most character styles one verse may carry.
+const MAX_VERSE_SPANS: usize = 4096;
 
 /// The input formats an import can come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -215,12 +240,54 @@ fn usfm_sources(path: &Path) -> Result<Vec<SourceFile>> {
         if files.is_empty() {
             bail!("{} holds no .usfm or .sfm file", path.display());
         }
+        check_source_count(files.len())?;
+        let mut total = 0usize;
+        for (_, bytes) in &files {
+            total = total.saturating_add(bytes.len());
+        }
+        if total as u64 > MAX_SOURCE_TOTAL_BYTES {
+            bail!(
+                "the archive holds {total} bytes of source, the limit is {MAX_SOURCE_TOTAL_BYTES}"
+            );
+        }
         return Ok(files);
     }
-    Ok(vec![(
-        name,
-        std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?,
-    )])
+    Ok(vec![(name, read_source_file(path)?)])
+}
+
+/// Reads a source file under a hard size limit.
+fn read_source_file(path: &Path) -> Result<Vec<u8>> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let length = file
+        .metadata()
+        .with_context(|| format!("cannot inspect {}", path.display()))?
+        .len();
+    if length > MAX_SOURCE_FILE_BYTES {
+        bail!(
+            "{} is {length} bytes, the limit for one source file is {MAX_SOURCE_FILE_BYTES}",
+            path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(length.min(1024 * 1024) as usize);
+    file.take(MAX_SOURCE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    if bytes.len() as u64 > MAX_SOURCE_FILE_BYTES {
+        bail!(
+            "{} grew past the {MAX_SOURCE_FILE_BYTES} byte limit while it was read",
+            path.display()
+        );
+    }
+    Ok(bytes)
+}
+
+/// Refuses a source that names more files than an import may read.
+fn check_source_count(files: usize) -> Result<()> {
+    if files > MAX_SOURCE_FILES {
+        bail!("the source names {files} files, the limit is {MAX_SOURCE_FILES}");
+    }
+    Ok(())
 }
 
 /// Collects every `.usfm` and `.sfm` file directly inside a folder, in name order.
@@ -235,20 +302,26 @@ fn usfm_folder(path: &Path) -> Result<Vec<SourceFile>> {
     if names.is_empty() {
         bail!("{} holds no .usfm or .sfm file", path.display());
     }
+    check_source_count(names.len())?;
 
-    names
-        .into_iter()
-        .map(|name| {
-            let label = name
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let bytes =
-                std::fs::read(&name).with_context(|| format!("cannot read {}", name.display()))?;
-            Ok((label, bytes))
-        })
-        .collect()
+    let mut total = 0u64;
+    let mut sources = Vec::with_capacity(names.len());
+    for name in names {
+        let label = name
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let bytes = read_source_file(&name)?;
+        total = total.saturating_add(bytes.len() as u64);
+        if total > MAX_SOURCE_TOTAL_BYTES {
+            bail!(
+                "the folder holds {total} bytes of source, the limit is {MAX_SOURCE_TOTAL_BYTES}"
+            );
+        }
+        sources.push((label, bytes));
+    }
+    Ok(sources)
 }
 
 /// Whether a file name looks like a USFM document by its extension.
@@ -259,7 +332,7 @@ fn is_usfm_name(name: &str) -> bool {
 
 /// Reads a text file, accepting UTF-8 and falling back to Latin-1.
 fn read_text(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bytes = read_source_file(path)?;
     decode_text(&bytes).with_context(|| format!("{} is not text", path.display()))
 }
 
@@ -392,6 +465,12 @@ impl VerseAccumulator {
         }
         let mut separator = self.space_pending || segment.starts_with(char::is_whitespace);
         for word in segment.split_whitespace() {
+            let needed = word.len() + usize::from(!self.text.is_empty() && separator);
+            if self.text.len() + needed > MAX_VERSE_TEXT_BYTES {
+                // The format stores a `u16` length per verse, so text past this
+                // point could never be written. Stop rather than grow forever.
+                return;
+            }
             if !self.text.is_empty() && separator {
                 self.text.push(' ');
             }
@@ -408,6 +487,9 @@ impl VerseAccumulator {
 
     /// Attaches a structural break at an offset already recorded.
     pub(crate) fn add_mark_at(&mut self, offset: u16, kind: MarkKind, level: u8, payload: &str) {
+        if self.marks.len() >= MAX_VERSE_MARKS {
+            return;
+        }
         let offset = offset.min(self.offset());
         self.marks.push(RawMark {
             offset,
@@ -419,6 +501,9 @@ impl VerseAccumulator {
 
     /// Closes a styled range that started at `start`, dropping it when it is empty.
     pub(crate) fn close_span(&mut self, style: SpanStyle, start: u16) {
+        if self.spans.len() >= MAX_VERSE_SPANS {
+            return;
+        }
         let end = self.offset();
         if end > start {
             self.spans.push(RawSpan { start, end, style });

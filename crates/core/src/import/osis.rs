@@ -81,7 +81,15 @@ impl<'d> Parser<'d> {
                     return Err(error).context("the OSIS file is not well-formed XML");
                 }
                 Ok(Event::Eof) => break,
-                Ok(Event::Start(element)) => self.start(&element),
+                Ok(Event::Start(element)) => {
+                    if self.stack.len() >= super::MAX_XML_DEPTH {
+                        bail!(
+                            "the osis file nests deeper than {} elements",
+                            super::MAX_XML_DEPTH
+                        );
+                    }
+                    self.start(&element);
+                }
                 Ok(Event::Empty(element)) => self.empty(&element),
                 Ok(Event::End(_)) => self.end(),
                 Ok(Event::Text(text)) => self.text(&text.xml10_content()?),

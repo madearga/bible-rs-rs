@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use bible_core::import::zip::{
-    MAX_ENTRY_BYTES, entry_names, extract_archive, read_archive, read_archive_bytes,
+    MAX_ARCHIVE_BYTES, MAX_ENTRIES, MAX_ENTRY_BYTES, entry_names, extract_archive, read_archive,
+    read_archive_bytes,
 };
 use bible_core::{ImportFormat, TranslationMeta, import_path};
 
@@ -19,6 +20,8 @@ struct Entry<'a> {
     data: &'a [u8],
     /// The size the entry claims to expand to, which a bomb misstates.
     declared: u32,
+    /// The Unix mode the entry carries, which is how a zip spells a symlink.
+    mode: u32,
 }
 
 /// Builds a stored zip archive in memory.
@@ -47,7 +50,7 @@ fn archive(entries: &[Entry<'_>]) -> Vec<u8> {
         out.extend_from_slice(entry.data);
 
         directory.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-        directory.extend_from_slice(&20u16.to_le_bytes());
+        directory.extend_from_slice(&0x0314u16.to_le_bytes());
         directory.extend_from_slice(&20u16.to_le_bytes());
         directory.extend_from_slice(&0u16.to_le_bytes());
         directory.extend_from_slice(&0u16.to_le_bytes());
@@ -61,7 +64,7 @@ fn archive(entries: &[Entry<'_>]) -> Vec<u8> {
         directory.extend_from_slice(&0u16.to_le_bytes());
         directory.extend_from_slice(&0u16.to_le_bytes());
         directory.extend_from_slice(&0u16.to_le_bytes());
-        directory.extend_from_slice(&0u32.to_le_bytes());
+        directory.extend_from_slice(&entry.mode.wrapping_shl(16).to_le_bytes());
         directory.extend_from_slice(&offset.to_le_bytes());
         directory.extend_from_slice(name);
         count += 1;
@@ -168,11 +171,13 @@ fn a_path_that_escapes_the_root_is_refused() {
                 name: "good.txt",
                 data: b"expected",
                 declared: 8,
+                mode: 0o100644,
             },
             Entry {
                 name: "../escape.txt",
                 data: b"escaped",
                 declared: 7,
+                mode: 0o100644,
             },
         ]),
     );
@@ -202,6 +207,7 @@ fn an_absolute_path_is_refused() {
             name: "/etc/passwd",
             data: b"nope",
             declared: 4,
+            mode: 0o100644,
         }]),
     );
     assert!(read_archive(&path).is_err());
@@ -217,6 +223,7 @@ fn an_entry_that_expands_to_a_huge_size_is_refused() {
             name: "bomb.txt",
             data: b"tiny",
             declared: u32::try_from(MAX_ENTRY_BYTES + 1).expect("the size fits"),
+            mode: 0o100644,
         }]),
     );
     let error = read_archive(&path).expect_err("a decompression bomb must be refused");
@@ -237,6 +244,7 @@ fn an_entry_that_expands_far_beyond_its_stored_size_is_refused() {
             name: "ratio.txt",
             data: b"tiny",
             declared: 4 * 1024 * 1024,
+            mode: 0o100644,
         }]),
     );
     let error = read_archive(&path).expect_err("a decompression bomb must be refused");
@@ -255,6 +263,7 @@ fn a_truncated_archive_is_an_error_and_not_a_panic() {
         name: "good.txt",
         data: b"expected",
         declared: 8,
+        mode: 0o100644,
     }]);
     let truncated = &bytes[..bytes.len() / 2];
     let path = scratch.write("truncated.zip", truncated);
@@ -272,6 +281,7 @@ fn a_plain_archive_reads_back_its_files() {
             name: "folder/good.txt",
             data: b"expected",
             declared: 8,
+            mode: 0o100644,
         }]),
     );
     let entries = read_archive(&path).expect("the archive reads");
@@ -294,11 +304,13 @@ fn a_zip_of_usfm_documents_is_recognised_and_imported() {
                 name: "gen.usfm",
                 data: b"\\id GEN\n\\c 1\n\\v 1 Alpha one.\n",
                 declared: 29,
+                mode: 0o100644,
             },
             Entry {
                 name: "texts/matt.sfm",
                 data: b"\\id MAT\n\\c 1\n\\v 1 Delta four.\n",
                 declared: 31,
+                mode: 0o100644,
             },
         ]),
     );
@@ -313,4 +325,110 @@ fn a_zip_of_usfm_documents_is_recognised_and_imported() {
     assert_eq!(translation.verse_text(genesis), "Alpha one.");
     let matthew = translation.verse_at(39, 1, 1).expect("the slot exists");
     assert_eq!(translation.verse_text(matthew), "Delta four.");
+}
+
+#[test]
+fn an_entry_that_is_a_symlink_is_refused() {
+    let scratch = Scratch::new("symlink");
+    let path = scratch.write(
+        "symlink.zip",
+        &archive(&[Entry {
+            name: "link.txt",
+            data: b"../../outside.txt",
+            declared: 17,
+            mode: 0o120777,
+        }]),
+    );
+
+    let error = read_archive(&path).expect_err("a link entry is refused");
+    assert!(
+        format!("{error:#}").contains("symbolic link"),
+        "the error says why: {error:#}"
+    );
+    let extracted = extract_archive(&path, &scratch.path.join("out"));
+    assert!(extracted.is_err(), "extraction refuses the link too");
+    assert!(
+        !scratch.path.join("outside.txt").exists(),
+        "nothing was written through the link"
+    );
+}
+
+#[test]
+fn an_existing_link_at_the_destination_is_not_followed() {
+    let scratch = Scratch::new("destination-link");
+    let path = scratch.write(
+        "plain.zip",
+        &archive(&[Entry {
+            name: "escaped.txt",
+            data: b"expected",
+            declared: 8,
+            mode: 0o100644,
+        }]),
+    );
+    let outside = scratch.path.join("outside.txt");
+    std::fs::write(&outside, "untouched sentinel").expect("write the sentinel");
+    let root = scratch.path.join("out");
+    std::fs::create_dir_all(&root).expect("create the root");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, root.join("escaped.txt")).expect("plant the link");
+
+    let error = extract_archive(&path, &root).expect_err("the planted link is refused");
+    assert!(
+        format!("{error:#}").contains("outside the extraction root"),
+        "the error says why: {error:#}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("the sentinel remains"),
+        "untouched sentinel",
+        "the link target was not written through"
+    );
+}
+
+#[test]
+fn the_entry_limit_counts_directory_entries() {
+    let scratch = Scratch::new("directories");
+    let names = (0..=MAX_ENTRIES)
+        .map(|index| format!("folder{index}/"))
+        .collect::<Vec<_>>();
+    let entries = names
+        .iter()
+        .map(|name| Entry {
+            name,
+            data: b"",
+            declared: 0,
+            mode: 0o040755,
+        })
+        .collect::<Vec<_>>();
+    let path = scratch.write("directories.zip", &archive(&entries));
+
+    let error = read_archive(&path).expect_err("the entry limit includes folders");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(&format!("{} entries", MAX_ENTRIES + 1)),
+        "{message}"
+    );
+    assert!(message.contains("allowed"), "{message}");
+    assert!(
+        extract_archive(&path, &scratch.path.join("out")).is_err(),
+        "extraction applies the same limit"
+    );
+}
+
+#[test]
+fn an_archive_file_past_the_input_limit_is_refused() {
+    let scratch = Scratch::new("oversized");
+    let path = scratch.path.join("oversized.zip");
+    // A sparse file of the declared length costs no disk space, and the limit is
+    // checked before anything is read.
+    let file = std::fs::File::create(&path).expect("create the file");
+    file.set_len(MAX_ARCHIVE_BYTES + 1).expect("set the length");
+
+    let error = entry_names(&path).expect_err("the input limit is applied when listing");
+    let message = format!("{error:#}");
+    assert!(message.contains("more than"), "{message}");
+    assert!(message.contains("allowed for an archive"), "{message}");
+    assert!(
+        read_archive(&path).is_err(),
+        "reading applies the same limit"
+    );
 }

@@ -14,9 +14,11 @@
 //! u32 body_len zstd(body)
 //! ```
 
+use std::io::Read;
+
 use anyhow::{Result, bail};
 
-use crate::books::{CHAPTER_COUNT, VERSES_PER_CHAPTER};
+use crate::books::{CHAPTER_COUNT, VERSE_COUNT, VERSES_PER_CHAPTER};
 use crate::model::{Mark, MarkKind, Span, SpanStyle, Translation, TranslationMeta, Verse};
 
 /// The four bytes every translation file starts with.
@@ -27,6 +29,24 @@ pub const FORMAT_VERSION: u16 = 1;
 
 /// The zstd level used when writing; a middle setting keeps decode fast and files small.
 const COMPRESSION_LEVEL: i32 = 3;
+
+/// The largest metadata header this reader accepts.
+///
+/// A real header is a small JSON object. The bound stops a file from claiming a
+/// four gibibyte header before the bytes are there.
+pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
+
+/// The largest expanded body this reader accepts.
+///
+/// A whole translation body is a few tens of megabytes at most, so the bound
+/// stops a small compressed file from expanding into a memory exhaustion.
+pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// The bytes a mark record takes in the body.
+const MARK_RECORD_BYTES: usize = 12;
+
+/// The bytes a span record takes in the body.
+const SPAN_RECORD_BYTES: usize = 5;
 
 /// Encodes a translation into the binary format.
 ///
@@ -49,15 +69,32 @@ pub fn encode(translation: &Translation) -> Result<Vec<u8>> {
 }
 
 /// Decodes a translation from the binary format, checking every length and range.
+///
+/// The metadata and the expanded body are capped, the body is decompressed through
+/// a hard output limit, the verse count must equal the canonical grid, and the mark
+/// and span counts are checked against the bytes that remain before any vector is
+/// reserved for them.
 pub fn decode(bytes: &[u8]) -> Result<Translation> {
     let mut cursor = Cursor::new(bytes);
     check_header(&mut cursor)?;
     let meta_len = cursor.u32()? as usize;
+    if meta_len > MAX_METADATA_BYTES {
+        bail!("the metadata header is {meta_len} bytes, the limit is {MAX_METADATA_BYTES}");
+    }
     let meta: TranslationMeta = serde_json::from_slice(cursor.take(meta_len)?)?;
 
     let expected_body = cursor.u32()? as usize;
+    if expected_body > MAX_BODY_BYTES {
+        bail!("the body declares {expected_body} bytes, the limit is {MAX_BODY_BYTES}");
+    }
     let compressed = cursor.rest();
-    let body = zstd::stream::decode_all(compressed)?;
+    let mut body = Vec::new();
+    zstd::stream::read::Decoder::new(compressed)?
+        .take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_BODY_BYTES {
+        bail!("the body expands past the {MAX_BODY_BYTES} byte limit");
+    }
     if body.len() != expected_body {
         bail!(
             "body length is {} but the header says {expected_body}",
@@ -69,10 +106,16 @@ pub fn decode(bytes: &[u8]) -> Result<Translation> {
 }
 
 /// Reads only the metadata header, for listing installed translations cheaply.
+///
+/// The header is capped before it is read, so a file cannot claim a huge metadata
+/// length and force an allocation while a translation is listed.
 pub fn read_meta(bytes: &[u8]) -> Result<TranslationMeta> {
     let mut cursor = Cursor::new(bytes);
     check_header(&mut cursor)?;
     let meta_len = cursor.u32()? as usize;
+    if meta_len > MAX_METADATA_BYTES {
+        bail!("the metadata header is {meta_len} bytes, the limit is {MAX_METADATA_BYTES}");
+    }
     let meta = serde_json::from_slice(cursor.take(meta_len)?)?;
     Ok(meta)
 }
@@ -155,6 +198,9 @@ fn decode_body(meta: TranslationMeta, body: &[u8]) -> Result<Translation> {
     }
 
     let n = cursor.u32()? as usize;
+    if n != VERSE_COUNT {
+        bail!("the file holds {n} verses but the canonical grid holds {VERSE_COUNT}");
+    }
     let numbers = cursor.take(n)?;
     let number_ends = cursor.take(n)?;
     let text_lens = read_u16s(&mut cursor, n)?;
@@ -190,6 +236,12 @@ fn decode_body(meta: TranslationMeta, body: &[u8]) -> Result<Translation> {
     }
 
     let m = cursor.u32()? as usize;
+    if m > cursor.remaining() / MARK_RECORD_BYTES {
+        bail!(
+            "the file declares {m} marks but only {} bytes remain",
+            cursor.remaining()
+        );
+    }
     let mut marks = Vec::with_capacity(m);
     for _ in 0..m {
         let offset = cursor.u16()?;
@@ -212,6 +264,12 @@ fn decode_body(meta: TranslationMeta, body: &[u8]) -> Result<Translation> {
     }
 
     let k = cursor.u32()? as usize;
+    if k > cursor.remaining() / SPAN_RECORD_BYTES {
+        bail!(
+            "the file declares {k} spans but only {} bytes remain",
+            cursor.remaining()
+        );
+    }
     let mut spans = Vec::with_capacity(k);
     for _ in 0..k {
         let start = cursor.u16()?;
@@ -302,6 +360,11 @@ impl<'a> Cursor<'a> {
     /// The bytes not read yet.
     fn rest(&self) -> &'a [u8] {
         &self.bytes[self.position..]
+    }
+
+    /// How many bytes are not read yet.
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
     }
 
     /// Whether every byte has been read.

@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -31,6 +31,70 @@ use super::{Document, VerseAccumulator, assemble, decode_text, zip};
 
 /// The canonical index of Psalms, whose titles are superscriptions.
 const PSALMS: u8 = 18;
+
+/// The largest number of bytes one compressed block may expand to.
+///
+/// A real zText block holds one book, chapter, or verse, so a few hundred
+/// kilobytes is already large. The bound stops a small hostile block from being
+/// a decompression bomb.
+const MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+
+/// The largest total number of decoded block bytes one module may produce.
+///
+/// A whole module decodes to a few tens of megabytes at most, so this leaves
+/// room for a large module without letting the block table multiply the bound.
+const MAX_MODULE_BLOCK_BYTES: usize = 64 * 1024 * 1024;
+
+/// The largest total decoded verse text one module may produce.
+///
+/// The bound is checked against the bytes taken from a decoded block before the
+/// text is copied into a string, so repeated index records cannot multiply the
+/// text budget either.
+const MAX_MODULE_TEXT_BYTES: usize = 32 * 1024 * 1024;
+
+/// The largest number of verse index records any supported versification needs.
+///
+/// The canonical grid holds 31,102 verses and the Apocrypha a module may append
+/// adds a few thousand more, with one extra record per book and chapter
+/// introduction. The bound is deliberately generous and still far below what a
+/// hostile index could declare.
+const MAX_VERSE_RECORDS: usize = 48_000;
+
+/// The largest number of block table records a module may declare.
+///
+/// Every block holds at least one verse, so there can never be more blocks than
+/// verse records.
+const MAX_BLOCK_RECORDS: usize = MAX_VERSE_RECORDS;
+
+/// The decoded bytes one module has produced so far, checked against the hard
+/// budgets above.
+#[derive(Debug, Default)]
+struct DecodeBudget {
+    /// Decoded bytes across every block of both testaments.
+    blocks: usize,
+    /// Verse text bytes taken from the decoded blocks.
+    text: usize,
+}
+
+impl DecodeBudget {
+    /// Adds one decoded block and refuses it when either budget would be passed.
+    fn add_block(&mut self, bytes: usize) -> Result<()> {
+        self.blocks = self.blocks.saturating_add(bytes);
+        if self.blocks > MAX_MODULE_BLOCK_BYTES {
+            bail!("the module's blocks expand past the {MAX_MODULE_BLOCK_BYTES} byte limit");
+        }
+        Ok(())
+    }
+
+    /// Reserves verse text before it is decoded and refuses it past the budget.
+    fn take_text(&mut self, bytes: usize) -> Result<()> {
+        self.text = self.text.saturating_add(bytes);
+        if self.text > MAX_MODULE_TEXT_BYTES {
+            bail!("the module's verse text passes the {MAX_MODULE_TEXT_BYTES} byte limit");
+        }
+        Ok(())
+    }
+}
 
 /// The markup dialect a module's text is written in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,8 +166,9 @@ pub(crate) fn import(
 
     let mut document = Document::new();
     let mut markup = manifest.markup;
+    let mut budget = DecodeBudget::default();
     for (testament, books_range) in [("ot", 0u8..39u8), ("nt", 39u8..66)] {
-        let entries = manifest.read_testament(&store, testament)?;
+        let entries = manifest.read_testament(&store, testament, &mut budget)?;
         if entries.is_empty() {
             continue;
         }
@@ -154,11 +219,52 @@ enum Store {
     Disk(PathBuf),
 }
 
+/// Whether a path stays inside the module it is used from.
+///
+/// Only normal components and the current-folder component are accepted, so an
+/// absolute path, a parent traversal, and a platform prefix are all refused
+/// before they are joined onto the module root.
+fn is_safe_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+/// Resolves a module file under the module root and verifies it stays there.
+///
+/// Returns `None` when the module does not hold the file. A path that is not
+/// relative, or that resolves outside the root through a link, is an error.
+fn resolve_module_file(root: &Path, name: &str) -> Result<Option<PathBuf>> {
+    let relative = Path::new(name);
+    if !is_safe_relative(relative) {
+        bail!("the module path {name:?} is not a relative path inside the module");
+    }
+    let candidate = root.join(relative);
+    if !candidate.is_file() {
+        return Ok(None);
+    }
+    let resolved = candidate
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", candidate.display()))?;
+    if !resolved.starts_with(root) {
+        bail!(
+            "the module path {name:?} resolves outside the module root at {}",
+            resolved.display()
+        );
+    }
+    Ok(Some(resolved))
+}
+
 impl Store {
     /// Opens a module that is a zip, a folder, or a manifest file.
     fn open(path: &Path) -> Result<Self> {
         if path.is_dir() {
-            return Ok(Self::Disk(module_root(path)?));
+            let root = module_root(path)?;
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("cannot resolve the module root {}", root.display()))?;
+            return Ok(Self::Disk(root));
         }
         if path
             .extension()
@@ -168,7 +274,10 @@ impl Store {
                 .parent()
                 .and_then(Path::parent)
                 .with_context(|| format!("{} is not inside a mods.d folder", path.display()))?;
-            return Ok(Self::Disk(root.to_path_buf()));
+            let root = root
+                .canonicalize()
+                .with_context(|| format!("cannot resolve the module root {}", root.display()))?;
+            return Ok(Self::Disk(root));
         }
 
         let entries = zip::read_archive(path)?;
@@ -189,10 +298,9 @@ impl Store {
         match self {
             Self::Memory(files) => Ok(files.get(&name.to_ascii_lowercase()).cloned()),
             Self::Disk(root) => {
-                let path = root.join(name);
-                if !path.is_file() {
+                let Some(path) = resolve_module_file(root, name)? else {
                     return Ok(None);
-                }
+                };
                 Ok(Some(std::fs::read(&path).with_context(|| {
                     format!("cannot read {}", path.display())
                 })?))
@@ -230,8 +338,14 @@ fn collect_files(directory: &Path, prefix: &str, found: &mut Vec<String>) {
             "{prefix}{}",
             entry.file_name().to_string_lossy().to_ascii_lowercase()
         );
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_files(&path, &format!("{name}/"), found);
         } else {
             found.push(name);
@@ -344,6 +458,9 @@ impl Manifest {
                     .to_string()
             })
             .unwrap_or_else(|| guess_data_path(store, &name));
+        if !is_safe_relative(Path::new(&data_path)) {
+            bail!("the module DataPath {data_path:?} is not a relative path inside the module");
+        }
 
         let compression = entries
             .get("CompressType")
@@ -409,15 +526,29 @@ impl Manifest {
     }
 
     /// Reads one testament's verse text in the module's own order.
-    fn read_testament(&self, store: &Store, testament: &str) -> Result<Vec<String>> {
+    fn read_testament(
+        &self,
+        store: &Store,
+        testament: &str,
+        budget: &mut DecodeBudget,
+    ) -> Result<Vec<String>> {
         match self.driver {
-            Driver::ZText => self.read_ztext(store, testament),
-            Driver::RawText => self.read_rawtext(store, testament),
+            Driver::ZText => self.read_ztext(store, testament, budget),
+            Driver::RawText => self.read_rawtext(store, testament, budget),
         }
     }
 
     /// Reads the compressed blocks a zText testament holds and slices out its verses.
-    fn read_ztext(&self, store: &Store, testament: &str) -> Result<Vec<String>> {
+    ///
+    /// Every block is decompressed through a hard output limit and the module's
+    /// decoded byte budget, and the block table's declared size is checked only as
+    /// an early refusal, never trusted as the size the decoder produces.
+    fn read_ztext(
+        &self,
+        store: &Store,
+        testament: &str,
+        budget: &mut DecodeBudget,
+    ) -> Result<Vec<String>> {
         let Some((index, sizes, body)) = self.ztext_files(store, testament)? else {
             return Ok(Vec::new());
         };
@@ -436,27 +567,54 @@ impl Manifest {
 
         for record in verse_records(&index)? {
             if let std::collections::btree_map::Entry::Vacant(slot) = blocks.entry(record.block) {
-                let (start, end) = *block_bounds.get(record.block as usize).with_context(|| {
-                    format!(
-                        "verse index names block {} which the module lacks",
+                let (start, end, declared) =
+                    *block_bounds.get(record.block as usize).with_context(|| {
+                        format!(
+                            "verse index names block {} which the module lacks",
+                            record.block
+                        )
+                    })?;
+                if declared as usize > MAX_BLOCK_BYTES {
+                    bail!(
+                        "block {} declares {declared} bytes, the limit is {MAX_BLOCK_BYTES}",
                         record.block
-                    )
-                })?;
-                let end = end.min(body.len() as u32);
-                let start = start.min(end);
+                    );
+                }
+                if end as usize > body.len() {
+                    bail!(
+                        "block {} runs past the end of the compressed data",
+                        record.block
+                    );
+                }
                 let slice = &body[start as usize..end as usize];
                 let mut decoded = Vec::new();
                 flate2::read::ZlibDecoder::new(slice)
+                    .take(MAX_BLOCK_BYTES as u64 + 1)
                     .read_to_end(&mut decoded)
                     .with_context(|| format!("block {} cannot be decompressed", record.block))?;
+                if decoded.len() > MAX_BLOCK_BYTES {
+                    bail!(
+                        "block {} expands past the {MAX_BLOCK_BYTES} byte limit",
+                        record.block
+                    );
+                }
+                budget.add_block(decoded.len())?;
                 slot.insert(decoded);
             }
             let block = blocks.get(&record.block).unwrap_or(&empty);
             let start = record.offset as usize;
-            let end = start
-                .saturating_add(record.length as usize)
-                .min(block.len());
-            let slice = block.get(start..end).unwrap_or_default();
+            let end = start.checked_add(record.length as usize).with_context(|| {
+                format!("verse index record in block {} overflows", record.block)
+            })?;
+            if end > block.len() {
+                bail!(
+                    "verse index record points past the end of block {} at {start} plus {} bytes",
+                    record.block,
+                    record.length
+                );
+            }
+            let slice = &block[start..end];
+            budget.take_text(slice.len())?;
             texts.push(decode_text(slice).unwrap_or_default());
         }
 
@@ -491,7 +649,12 @@ impl Manifest {
     }
 
     /// Reads a RawText testament, whose text is one newline-terminated entry per verse.
-    fn read_rawtext(&self, store: &Store, testament: &str) -> Result<Vec<String>> {
+    fn read_rawtext(
+        &self,
+        store: &Store,
+        testament: &str,
+        budget: &mut DecodeBudget,
+    ) -> Result<Vec<String>> {
         let base = format!("{}/{testament}", self.data_path);
         let Some(body) = store.read(&base)? else {
             return Ok(Vec::new());
@@ -505,6 +668,12 @@ impl Manifest {
                         index.len()
                     );
                 }
+                if index.len() / 6 > MAX_VERSE_RECORDS {
+                    bail!(
+                        "the {testament} verse index holds {} records, the limit is {MAX_VERSE_RECORDS}",
+                        index.len() / 6
+                    );
+                }
                 let mut texts = Vec::with_capacity(index.len() / 6);
                 for chunk in index.as_chunks::<6>().0 {
                     let start =
@@ -512,6 +681,7 @@ impl Manifest {
                     let length = u16::from_le_bytes([chunk[4], chunk[5]]) as usize;
                     let end = start.saturating_add(length).min(body.len());
                     let slice = body.get(start..end).unwrap_or_default();
+                    budget.take_text(slice.len())?;
                     texts.push(decode_text(slice)?);
                 }
                 Ok(texts)
@@ -548,7 +718,11 @@ fn verse_records(index: &[u8]) -> Result<Vec<VerseRecord>> {
             index.len()
         );
     }
-    let mut records = Vec::with_capacity(index.len() / 10);
+    let count = index.len() / 10;
+    if count > MAX_VERSE_RECORDS {
+        bail!("the verse index holds {count} records, the limit is {MAX_VERSE_RECORDS}");
+    }
+    let mut records = Vec::with_capacity(count);
     for chunk in index.as_chunks::<10>().0 {
         records.push(VerseRecord {
             block: u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
@@ -561,23 +735,29 @@ fn verse_records(index: &[u8]) -> Result<Vec<VerseRecord>> {
 
 /// Reads the block table, which is one twelve byte record per compressed block.
 ///
-/// The record gives where the block's compressed bytes start and how long they are;
-/// the third field is the size the block expands to, which the decoder does not need.
-fn block_bounds(sizes: &[u8]) -> Result<Vec<(u32, u32)>> {
+/// The record gives where the block's compressed bytes start and how long they are,
+/// and returns the size the block claims to expand to. The claimed size is used only
+/// as an early refusal, never as the real decompressed length.
+fn block_bounds(sizes: &[u8]) -> Result<Vec<(u32, u32, u32)>> {
     if !sizes.len().is_multiple_of(12) {
         bail!(
             "the block table is {} bytes, which is not a whole number of twelve byte records",
             sizes.len()
         );
     }
-    let mut bounds = Vec::with_capacity(sizes.len() / 12);
+    let count = sizes.len() / 12;
+    if count > MAX_BLOCK_RECORDS {
+        bail!("the block table holds {count} records, the limit is {MAX_BLOCK_RECORDS}");
+    }
+    let mut bounds = Vec::with_capacity(count);
     for chunk in sizes.as_chunks::<12>().0 {
         let start = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let length = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+        let declared = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
         let end = start
             .checked_add(length)
             .context("a block in the table runs past the end of the archive")?;
-        bounds.push((start, end));
+        bounds.push((start, end, declared));
     }
     Ok(bounds)
 }

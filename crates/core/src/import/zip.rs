@@ -14,6 +14,12 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+/// Largest compressed archive file this reader accepts, in bytes.
+///
+/// The bound is checked before the file is read, so a huge file cannot be
+/// pulled into memory just to discover that it is not a zip.
+pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Largest uncompressed size allowed for a single entry, in bytes.
 pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -40,7 +46,7 @@ pub struct ArchiveEntry {
 /// Use this when the caller wants the files and not the archive's layout, such
 /// as importing a zip of USFM documents or a zipped SWORD module.
 pub fn read_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
-    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bytes = read_archive_file(path)?;
     read_archive_bytes(&bytes).with_context(|| format!("{} is not a usable zip", path.display()))
 }
 
@@ -49,13 +55,24 @@ pub fn read_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
 /// Used to tell a zip of USFM documents from a zipped SWORD module before either
 /// importer commits to reading it.
 pub fn entry_names(path: &Path) -> Result<Vec<String>> {
-    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bytes = read_archive_file(path)?;
     let mut archive = open(&bytes)?;
+    if archive.len() > MAX_ENTRIES {
+        bail!(
+            "archive holds {} entries, more than the {MAX_ENTRIES} allowed",
+            archive.len()
+        );
+    }
     let mut names = Vec::new();
+    let mut seen = 0usize;
     for index in 0..archive.len() {
         let file = archive
             .by_index_raw(index)
             .with_context(|| format!("entry {index} cannot be read"))?;
+        seen += 1;
+        if seen > MAX_ENTRIES {
+            bail!("archive holds more than {MAX_ENTRIES} entries, refusing to list it further");
+        }
         if file.is_dir() {
             continue;
         }
@@ -69,17 +86,29 @@ pub fn entry_names(path: &Path) -> Result<Vec<String>> {
 /// Reads every file in an archive already held in memory.
 pub fn read_archive_bytes(bytes: &[u8]) -> Result<Vec<ArchiveEntry>> {
     let mut archive = open(bytes)?;
+    if archive.len() > MAX_ENTRIES {
+        bail!(
+            "archive holds {} entries, more than the {MAX_ENTRIES} allowed",
+            archive.len()
+        );
+    }
     let mut entries = Vec::new();
     let mut total = 0u64;
+    let mut seen = 0usize;
 
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
             .with_context(|| format!("entry {index} cannot be read"))?;
+        seen += 1;
+        if seen > MAX_ENTRIES {
+            bail!("archive holds more than {MAX_ENTRIES} entries, refusing to read it further");
+        }
+        let name = safe_name(file.enclosed_name(), file.name())?;
+        reject_symlink(&file, &name)?;
         if file.is_dir() {
             continue;
         }
-        let name = safe_name(file.enclosed_name(), file.name())?;
         let declared = file.size();
         let stored = file.compressed_size();
         check_expansion(&name, declared, stored)?;
@@ -93,9 +122,6 @@ pub fn read_archive_bytes(bytes: &[u8]) -> Result<Vec<ArchiveEntry>> {
         }
         let body = read_limited(&mut file, &name, declared)?;
         entries.push(ArchiveEntry { name, bytes: body });
-        if entries.len() > MAX_ENTRIES {
-            bail!("archive holds more than {MAX_ENTRIES} files, refusing to read it further");
-        }
     }
 
     Ok(entries)
@@ -106,23 +132,51 @@ pub fn read_archive_bytes(bytes: &[u8]) -> Result<Vec<ArchiveEntry>> {
 /// Returns the paths written, all of which are inside `root`. The root is
 /// created when it does not exist.
 pub fn extract_archive(path: &Path, root: &Path) -> Result<Vec<PathBuf>> {
-    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bytes = read_archive_file(path)?;
     let mut archive = open(&bytes)?;
+    if archive.len() > MAX_ENTRIES {
+        bail!(
+            "archive holds {} entries, more than the {MAX_ENTRIES} allowed",
+            archive.len()
+        );
+    }
     std::fs::create_dir_all(root).with_context(|| format!("cannot create {}", root.display()))?;
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", root.display()))?;
 
     let mut written = Vec::new();
     let mut total = 0u64;
+    let mut seen = 0usize;
 
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
             .with_context(|| format!("entry {index} cannot be read"))?;
+        seen += 1;
+        if seen > MAX_ENTRIES {
+            bail!("archive holds more than {MAX_ENTRIES} entries, refusing to extract it further");
+        }
         let name = safe_name(file.enclosed_name(), file.name())?;
+        reject_symlink(&file, &name)?;
+        let target = prepare_target(&root, &name)?;
         if file.is_dir() {
-            let directory = root.join(&name);
-            ensure_inside(root, &directory)?;
-            std::fs::create_dir_all(&directory)
-                .with_context(|| format!("cannot create {}", directory.display()))?;
+            match std::fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => bail!(
+                    "archive folder {:?} collides with a file at {}",
+                    name,
+                    target.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&target)
+                        .with_context(|| format!("cannot create {}", target.display()))?;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("cannot inspect {}", target.display()));
+                }
+            }
             continue;
         }
         let declared = file.size();
@@ -136,25 +190,129 @@ pub fn extract_archive(path: &Path, root: &Path) -> Result<Vec<PathBuf>> {
             );
         }
 
-        let target = root.join(&name);
-        ensure_inside(root, &target)?;
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("cannot create {}", parent.display()))?;
-        }
         let body = read_limited(&mut file, &name, declared)?;
-        let mut output = std::fs::File::create(&target)
-            .with_context(|| format!("cannot create {}", target.display()))?;
+        // Exclusive creation is the point: an existing symlink or hard link at
+        // the destination makes this fail, so the write never follows one.
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .with_context(|| {
+                format!(
+                    "cannot create {} exclusively, the destination may already exist as a link",
+                    target.display()
+                )
+            })?;
         output
             .write_all(&body)
             .with_context(|| format!("cannot write {}", target.display()))?;
         written.push(target);
-        if written.len() > MAX_ENTRIES {
-            bail!("archive holds more than {MAX_ENTRIES} files, refusing to extract it further");
-        }
     }
 
     Ok(written)
+}
+
+/// Reads a whole archive file under a hard size limit.
+///
+/// The declared file length is checked first and the read is bounded, so a file
+/// that grows between the check and the read still cannot pass the limit.
+fn read_archive_file(path: &Path) -> Result<Vec<u8>> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let length = file
+        .metadata()
+        .with_context(|| format!("cannot inspect {}", path.display()))?
+        .len();
+    if length > MAX_ARCHIVE_BYTES {
+        bail!(
+            "{} is {length} bytes, more than the {MAX_ARCHIVE_BYTES} allowed for an archive",
+            path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(length.min(1024 * 1024) as usize);
+    file.take(MAX_ARCHIVE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
+        bail!(
+            "{} grew past the {MAX_ARCHIVE_BYTES} byte limit while it was read",
+            path.display()
+        );
+    }
+    Ok(bytes)
+}
+
+/// Refuses an entry whose metadata says it is a symbolic link.
+///
+/// A zip can carry a link as its mode even when the entry looks like a file. The
+/// extractor never creates such an entry, and the in-memory reader never follows
+/// one, so it is refused wherever it appears.
+fn reject_symlink<R: Read>(file: &zip::read::ZipFile<'_, R>, name: &str) -> Result<()> {
+    if file
+        .unix_mode()
+        .is_some_and(|mode| mode & 0o170000 == 0o120000)
+    {
+        bail!("archive entry {name:?} is a symbolic link, which an import never follows");
+    }
+    Ok(())
+}
+
+/// Resolves the ancestors of a target under the root before anything is created.
+///
+/// Every existing ancestor must resolve inside the root, whether it is a real
+/// folder or a link that points inside it. A missing ancestor is created one
+/// component at a time, so the caller never calls `create_dir_all` on a path
+/// whose shape has not been checked. The returned path is the target with its
+/// ancestors resolved, and its leaf is not created here.
+fn prepare_target(root: &Path, name: &str) -> Result<PathBuf> {
+    let mut current = root.to_path_buf();
+    let components = Path::new(name)
+        .components()
+        .map(|component| component.as_os_str().to_owned())
+        .collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let last = index + 1 == components.len();
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let resolved = current
+                    .canonicalize()
+                    .with_context(|| format!("cannot resolve {}", current.display()))?;
+                if !resolved.starts_with(root) {
+                    bail!(
+                        "archive entry {name:?} resolves outside the extraction root at {}",
+                        resolved.display()
+                    );
+                }
+                current = resolved;
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                let resolved = current
+                    .canonicalize()
+                    .with_context(|| format!("cannot resolve {}", current.display()))?;
+                if !resolved.starts_with(root) {
+                    bail!(
+                        "archive entry {name:?} resolves outside the extraction root at {}",
+                        resolved.display()
+                    );
+                }
+                current = resolved;
+            }
+            Ok(_) if !last => {
+                bail!("archive entry {name:?} has an ancestor that is not a folder");
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !last => {
+                std::fs::create_dir(&current)
+                    .with_context(|| format!("cannot create {}", current.display()))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot inspect {}", current.display()));
+            }
+        }
+    }
+    Ok(current)
 }
 
 /// Opens an archive from memory with a clear message when the bytes are not a zip.
@@ -191,25 +349,6 @@ fn safe_name(enclosed: Option<PathBuf>, raw: &str) -> Result<String> {
         bail!("archive entry {raw:?} has an empty path");
     }
     Ok(name)
-}
-
-/// Confirms a target path really sits under the root it was joined to.
-fn ensure_inside(root: &Path, target: &Path) -> Result<()> {
-    let root = root
-        .canonicalize()
-        .with_context(|| format!("cannot resolve {}", root.display()))?;
-    let parent = target
-        .parent()
-        .with_context(|| format!("{} has no parent folder", target.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("cannot create {}", parent.display()))?;
-    let parent = parent
-        .canonicalize()
-        .with_context(|| format!("cannot resolve {}", parent.display()))?;
-    if !parent.starts_with(&root) {
-        bail!("archive entry would be written outside {}", root.display());
-    }
-    Ok(())
 }
 
 /// Rejects an entry whose expanded size dwarfs the space it takes in the archive.

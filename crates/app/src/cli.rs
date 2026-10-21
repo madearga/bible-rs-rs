@@ -22,7 +22,7 @@ use bible_core::{
     ImportFormat, Reference, Translation, TranslationBuilder, TranslationMeta, books, import_with,
 };
 
-use crate::{BUNDLED_TRANSLATIONS, Library, data_dir};
+use crate::{BUNDLED_TRANSLATIONS, Library, check_translation_id, data_dir};
 
 /// What to print when a caller asks for help or names a verb the app does not
 /// have.
@@ -278,6 +278,7 @@ fn import(
             .get("id")
             .cloned()
             .unwrap_or_else(|| default_id(&path));
+        check_translation_id(&id).with_context(|| format!("cannot import {}", path.display()))?;
         let translation = parse_text(&text, &id, &path)?;
         (translation, "text".to_owned())
     };

@@ -117,6 +117,35 @@ fn default_paragraph_mode() -> bool {
     true
 }
 
+/// The smallest body text size the interface offers, in points.
+const MIN_TEXT_SIZE: f32 = 12.0;
+
+/// The largest body text size the interface offers, in points.
+const MAX_TEXT_SIZE: f32 = 32.0;
+
+/// The smallest line spacing the interface offers, as a multiple of the size.
+const MIN_LINE_SPACING: f32 = 1.0;
+
+/// The largest line spacing the interface offers, as a multiple of the size.
+const MAX_LINE_SPACING: f32 = 2.6;
+
+/// The narrowest measure the interface offers, in em.
+const MIN_LINE_LENGTH: f32 = 18.0;
+
+/// The widest measure the interface offers, in em.
+const MAX_LINE_LENGTH: f32 = 60.0;
+
+/// Checks one typography value against the range the interface supports.
+fn check_range(name: &str, value: f32, min: f32, max: f32) -> Result<()> {
+    if !value.is_finite() {
+        bail!("the exported {name} is not a finite number");
+    }
+    if !(min..=max).contains(&value) {
+        bail!("the exported {name} is {value}, which is outside {min} to {max}");
+    }
+    Ok(())
+}
+
 impl SettingsEntry {
     /// Flattens the live settings into their exported form.
     fn of(settings: &Settings) -> Self {
@@ -135,7 +164,23 @@ impl SettingsEntry {
     }
 
     /// Rebuilds the live settings from the exported form.
+    ///
+    /// Typography values are checked against the ranges the settings window
+    /// offers, so a document cannot import a negative or extreme size.
     fn into_settings(self) -> Result<Settings> {
+        check_range("text size", self.text_size, MIN_TEXT_SIZE, MAX_TEXT_SIZE)?;
+        check_range(
+            "line spacing",
+            self.line_spacing,
+            MIN_LINE_SPACING,
+            MAX_LINE_SPACING,
+        )?;
+        check_range(
+            "line length",
+            self.line_length,
+            MIN_LINE_LENGTH,
+            MAX_LINE_LENGTH,
+        )?;
         Ok(Settings {
             position: self.position.to_reference()?,
             theme: self.theme,
