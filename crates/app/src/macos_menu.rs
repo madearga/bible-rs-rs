@@ -227,6 +227,7 @@ pub fn menu_id(action: Action) -> String {
         Action::Copy => "copy".to_owned(),
         Action::CopyWithReference => "copy-with-reference".to_owned(),
         Action::Compare => "compare".to_owned(),
+        Action::ToggleParallel => "toggle-parallel".to_owned(),
         Action::ExportMarkdown => "export-markdown".to_owned(),
         Action::ExportJson => "export-json".to_owned(),
         Action::ToggleRedLetter => "toggle-red-letter".to_owned(),
