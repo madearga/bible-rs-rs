@@ -20,7 +20,7 @@ use bible_core::format::{self, MAGIC};
 use bible_core::study::Store;
 use bible_core::{Reference, Translation, TranslationBuilder, TranslationMeta, books};
 
-use crate::{BUNDLED_TRANSLATIONS, Library, data_dir};
+use crate::{BUNDLED_TRANSLATIONS, Library, check_translation_id, data_dir};
 
 /// What to print when a caller asks for help or names a verb the app does not
 /// have.
@@ -256,6 +256,7 @@ fn import(
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "imported".to_owned()),
         };
+        check_translation_id(&id).with_context(|| format!("cannot import {}", path.display()))?;
         parse_text(&source, &id, &path)?
     };
     let installed = library.install(&translation)?;

@@ -13,8 +13,11 @@
 #![warn(missing_docs)]
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
@@ -91,6 +94,40 @@ pub fn data_dir() -> PathBuf {
 /// The folder translated files are installed into.
 pub fn translations_dir(dir: &Path) -> PathBuf {
     dir.join("translations")
+}
+
+/// The longest translation identifier the installer accepts.
+///
+/// The identifier becomes a file name, so it is deliberately short. The bound
+/// keeps a hostile header from producing a name no file system will take.
+pub const MAX_TRANSLATION_ID: usize = 64;
+
+/// Checks that a translation identifier is safe to use as a file name.
+///
+/// An installed file is named after the identifier in its own header, so a
+/// hostile file must not be able to choose a path. Only ASCII letters, digits,
+/// underscore, and hyphen are accepted, the identifier may not be empty, and it
+/// may not be longer than [`MAX_TRANSLATION_ID`] bytes. Callers reject the file
+/// with the returned message rather than repairing the identifier.
+pub fn check_translation_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        bail!("a translation needs an identifier before it can be installed");
+    }
+    if id.len() > MAX_TRANSLATION_ID {
+        bail!(
+            "the translation identifier is {} bytes, the limit is {MAX_TRANSLATION_ID}",
+            id.len()
+        );
+    }
+    if let Some(byte) = id
+        .bytes()
+        .find(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-'))
+    {
+        bail!(
+            "the translation identifier {id:?} contains {byte:?}, only ASCII letters, digits, underscore, and hyphen are allowed"
+        );
+    }
+    Ok(())
 }
 
 /// The embedded sample translation, decoded.
@@ -227,18 +264,21 @@ impl Library {
     /// Writes a translation's binary form into the library folder.
     ///
     /// The file is named after the translation's own identifier, so installing
-    /// the same translation twice replaces it rather than duplicating it.
+    /// the same translation twice replaces it rather than duplicating it. The
+    /// identifier is checked first, because it becomes a file name. The bytes
+    /// are written through a sibling temporary file and renamed into place, so
+    /// an existing symlink or hard link at the destination is replaced rather
+    /// than followed.
     pub fn install(&mut self, translation: &Translation) -> Result<PathBuf> {
         let id = translation.meta().id.as_str();
-        if id.is_empty() {
-            bail!("a translation needs an identifier before it can be installed");
-        }
+        check_translation_id(id)?;
         let folder = translations_dir(&self.dir);
         fs::create_dir_all(&folder)
             .with_context(|| format!("cannot create {}", folder.display()))?;
+        check_folder_containment(&self.dir, &folder)?;
         let path = folder.join(format!("{id}.bbl"));
         let bytes = format::encode(translation)?;
-        fs::write(&path, &bytes).with_context(|| format!("cannot write {}", path.display()))?;
+        write_installed(&path, &bytes)?;
         self.installed
             .retain(|entry| entry.meta.id != translation.meta().id);
         self.loaded
@@ -252,6 +292,71 @@ impl Library {
         self.installed.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
         Ok(path)
     }
+}
+
+/// Verifies that the translations folder is really inside the data folder.
+///
+/// The folder is created before this check, so a link that was planted there
+/// resolves to its target and is caught. Without it a `translations` symlink
+/// would send every installed file outside the data folder.
+fn check_folder_containment(dir: &Path, folder: &Path) -> Result<()> {
+    let dir = fs::canonicalize(dir).with_context(|| format!("cannot resolve {}", dir.display()))?;
+    let folder =
+        fs::canonicalize(folder).with_context(|| format!("cannot resolve {}", folder.display()))?;
+    if !folder.starts_with(&dir) {
+        bail!(
+            "the translations folder {} is outside the data folder {}",
+            folder.display(),
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Writes installed bytes through a new file of our own and renames them into
+/// place.
+///
+/// Exclusive creation means the temporary name is never a file this call did
+/// not make, and the rename replaces the destination entry itself, so a symlink
+/// or hard link already sitting at the destination is removed rather than
+/// followed. A temporary file is removed when the write fails.
+fn write_installed(path: &Path, bytes: &[u8]) -> Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?;
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".tmp-{}-{unique}", std::process::id()));
+    let temporary = parent.join(temporary_name);
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .with_context(|| format!("cannot create {}", temporary.display()))?;
+    let write = file
+        .write_all(bytes)
+        .with_context(|| format!("cannot write {}", temporary.display()))
+        .and_then(|()| {
+            file.sync_all()
+                .with_context(|| format!("cannot flush {}", temporary.display()))
+        });
+    drop(file);
+
+    let result = write.and_then(|()| {
+        fs::rename(&temporary, path).with_context(|| format!("cannot write {}", path.display()))
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// One highlight in the study data.
