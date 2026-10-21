@@ -33,6 +33,7 @@ pub mod parallel;
 pub mod reader;
 pub mod search_panel;
 pub mod selection;
+pub mod settings;
 pub mod shortcuts;
 pub mod sidebar;
 pub mod theme;

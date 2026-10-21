@@ -103,6 +103,18 @@ struct SettingsEntry {
     show_headings: bool,
     /// Whether the words of Christ were red.
     words_of_christ_red: bool,
+    /// Whether verses flowed inside paragraphs.
+    ///
+    /// An export written before this field existed omits it, so the default
+    /// keeps the reader's earlier paragraph behavior rather than failing.
+    #[serde(default = "default_paragraph_mode")]
+    paragraph_mode: bool,
+}
+
+/// The paragraph mode an export or settings row written before the field existed
+/// is read as.
+fn default_paragraph_mode() -> bool {
+    true
 }
 
 impl SettingsEntry {
@@ -118,6 +130,7 @@ impl SettingsEntry {
             show_verse_numbers: settings.show_verse_numbers,
             show_headings: settings.show_headings,
             words_of_christ_red: settings.words_of_christ_red,
+            paragraph_mode: settings.paragraph_mode,
         }
     }
 
@@ -133,6 +146,7 @@ impl SettingsEntry {
             show_verse_numbers: self.show_verse_numbers,
             show_headings: self.show_headings,
             words_of_christ_red: self.words_of_christ_red,
+            paragraph_mode: self.paragraph_mode,
         })
     }
 }

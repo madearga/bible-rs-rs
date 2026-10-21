@@ -162,6 +162,11 @@ pub struct Settings {
     pub show_headings: bool,
     /// Whether the words of Christ are drawn in red.
     pub words_of_christ_red: bool,
+    /// Whether verses flow inside paragraphs rather than starting a new line.
+    ///
+    /// The default is on, which is what the reader already did, so a settings
+    /// row written before this field existed keeps its old behavior.
+    pub paragraph_mode: bool,
 }
 
 impl Default for Settings {
@@ -180,6 +185,7 @@ impl Default for Settings {
             show_verse_numbers: true,
             show_headings: true,
             words_of_christ_red: true,
+            paragraph_mode: true,
         }
     }
 }
