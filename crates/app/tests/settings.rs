@@ -70,6 +70,11 @@ fn the_window_opens_from_the_shot_view_and_saves_its_changes() {
         !harness.state().settings_window_is_open(),
         "the window starts closed"
     );
+    assert_eq!(
+        harness.state().status(),
+        "",
+        "a scratch data folder should leave the status line clean"
+    );
 
     harness.state_mut().set_view(ShotView::Settings);
     harness.run();

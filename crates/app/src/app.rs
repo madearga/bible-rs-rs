@@ -1888,10 +1888,13 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
     let reference = spec.reference;
     let translation = spec.translation.clone();
     let view = spec.view;
-    // The sidebar and parallel demos write study marks, so they must open a
-    // store in a scratch folder rather than the one a reader has on this machine.
+    // A demo view opens a store, and the sidebar and parallel demos write study
+    // marks, so they all use a scratch folder rather than the reader's real data
+    // folder. That keeps a shot from depending on, or creating, a file there.
     let scratch_data = match view {
-        Some(ShotView::StudySidebar | ShotView::Parallel) => Some(shot_scratch_dir()?),
+        Some(ShotView::StudySidebar | ShotView::Parallel | ShotView::Settings) => {
+            Some(shot_scratch_dir()?)
+        }
         _ => None,
     };
     let mut harness = egui_kittest::Harness::builder()

@@ -128,7 +128,7 @@ pub enum Action {
     ToggleHeadings,
     /// Show or hide the keyboard shortcut overlay.
     ShowShortcuts,
-    /// Show where the reading preferences live.
+    /// Open the settings window.
     Preferences,
 }
 
