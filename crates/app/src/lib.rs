@@ -26,6 +26,8 @@ pub mod book_picker;
 pub mod bundled;
 pub mod cli;
 pub mod history;
+#[cfg(target_os = "macos")]
+pub mod macos_menu;
 pub mod palette;
 pub mod parallel;
 pub mod reader;

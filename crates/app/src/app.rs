@@ -1246,6 +1246,19 @@ impl ReaderApp {
         }
     }
 
+    /// Performs the actions the menu bar queued since the last frame.
+    ///
+    /// The menu bridge fills the same action queue the keyboard uses, so a menu
+    /// item and its key equivalent take exactly one path through the app.
+    fn handle_menu_actions(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        for action in crate::macos_menu::drain_actions() {
+            self.perform(action, ctx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
+    }
+
     /// Performs one action from the shortcut table.
     fn perform(&mut self, action: Action, ctx: &egui::Context) {
         let now = ctx.input(|input| input.time);
@@ -1256,6 +1269,8 @@ impl ReaderApp {
                 | Action::TextLarger
                 | Action::TextSmaller
                 | Action::TextDefault
+                | Action::ToggleVerseNumbers
+                | Action::ToggleHeadings
         );
         match action {
             Action::JumpPalette => self.palette.open(),
@@ -1345,6 +1360,16 @@ impl ReaderApp {
             Action::TextLarger => self.typography.size = (self.typography.size + 1.0).min(32.0),
             Action::TextSmaller => self.typography.size = (self.typography.size - 1.0).max(12.0),
             Action::TextDefault => self.typography.size = Typography::default().size,
+            Action::ToggleVerseNumbers => {
+                self.typography.verse_numbers = !self.typography.verse_numbers;
+            }
+            Action::ToggleHeadings => {
+                self.typography.headings = !self.typography.headings;
+            }
+            Action::ShowShortcuts => self.overlay = !self.overlay,
+            Action::Preferences => {
+                self.status = "the reading preferences live in the View menu".to_owned();
+            }
         }
         if appearance {
             self.save_appearance();
@@ -1646,6 +1671,7 @@ impl eframe::App for ReaderApp {
         }
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
+        self.handle_menu_actions(&ctx);
         self.paint(ui);
     }
 

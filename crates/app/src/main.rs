@@ -57,7 +57,15 @@ fn launch() -> Result<()> {
     eframe::run_native(
         "Bible reader",
         options,
-        Box::new(move |cc| Ok(Box::new(ReaderApp::open(cc, theme, reference)))),
+        Box::new(move |cc| {
+            // The menu is built before the first frame, so the menu bar is in
+            // place as soon as the window is. A plain binary run from a
+            // terminal gets the same menu as a bundled application.
+            #[cfg(target_os = "macos")]
+            bible_app::macos_menu::install(cc.egui_ctx.clone())
+                .context("the menu bar did not install")?;
+            Ok(Box::new(ReaderApp::open(cc, theme, reference)))
+        }),
     )
     .map_err(|error| anyhow::anyhow!("the window did not open: {error}"))
 }
