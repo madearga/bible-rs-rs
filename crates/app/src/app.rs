@@ -332,32 +332,39 @@ impl ReaderApp {
     /// This is the state the render harness photographs. It writes only to the
     /// store the harness opened in a scratch folder, never to a reader's data.
     fn show_demo_study_sidebar(&mut self) {
-        let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is a canonical verse");
-        let note = Reference::new(42, 3, Some(17)).expect("John 3:17 is a canonical verse");
-        let bookmark = Reference::new(42, 3, Some(18)).expect("John 3:18 is a canonical verse");
+        self.seed_demo_marks(16, 17, 18);
+        // The harness may open on a remembered place, so move the demo page to
+        // the chapter its synthetic marks belong to.
+        let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is canonical");
+        self.navigate(highlight, 0.0);
+        self.study_sidebar_open = true;
+        self.refresh_study_rows();
+    }
+
+    /// Writes one highlight, one note, and one bookmark into the store the
+    /// harness opened.
+    ///
+    /// The marks are synthetic and live only in the scratch store, never in a
+    /// reader's own data.
+    fn seed_demo_marks(&mut self, highlight: u8, note: u8, bookmark: u8) {
+        let highlight = Reference::new(42, 3, Some(highlight)).expect("John 3 is canonical");
+        let note = Reference::new(42, 3, Some(note)).expect("John 3 is canonical");
+        let bookmark = Reference::new(42, 3, Some(bookmark)).expect("John 3 is canonical");
         if let Err(error) = self
             .study
             .set_highlight(highlight, Some(HighlightColour::Yellow))
         {
-            self.status = format!("cannot seed the sidebar highlight: {error:#}");
+            self.status = format!("cannot seed the highlight: {error:#}");
         }
-        if let Err(error) = self
-            .study
-            .set_note(note, "A synthetic note for the sidebar shot")
-        {
-            self.status = format!("cannot seed the sidebar note: {error:#}");
+        if let Err(error) = self.study.set_note(note, "A synthetic note for the shot") {
+            self.status = format!("cannot seed the note: {error:#}");
         }
         if let Err(error) = self
             .study
             .set_bookmark(bookmark, Some(Bookmark::with_label("synthetic bookmark")))
         {
-            self.status = format!("cannot seed the sidebar bookmark: {error:#}");
+            self.status = format!("cannot seed the bookmark: {error:#}");
         }
-        // The harness may open on a remembered place, so move the demo page to
-        // the chapter its synthetic marks belong to.
-        self.navigate(highlight, 0.0);
-        self.study_sidebar_open = true;
-        self.refresh_study_rows();
     }
 
     /// Opens the study sidebar, or closes it when it is already open.
@@ -385,20 +392,11 @@ impl ReaderApp {
     /// it writes only to the store the harness opened in a scratch folder, never
     /// to a reader's data.
     fn show_demo_parallel(&mut self) {
-        let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is a canonical verse");
-        let note = Reference::new(42, 3, Some(17)).expect("John 3:17 is a canonical verse");
-        if let Err(error) = self
-            .study
-            .set_highlight(highlight, Some(HighlightColour::Yellow))
-        {
-            self.status = format!("cannot seed the parallel highlight: {error:#}");
-        }
-        if let Err(error) = self
-            .study
-            .set_note(note, "A synthetic note for the parallel shot")
-        {
-            self.status = format!("cannot seed the parallel note: {error:#}");
-        }
+        // The verses sit near the top of the chapter, so a shot at the page's
+        // first screen shows the shared highlight and the margin note in every
+        // column rather than photographing an empty page.
+        self.seed_demo_marks(3, 4, 5);
+        let highlight = Reference::new(42, 3, Some(3)).expect("John 3:3 is a canonical verse");
         self.navigate(highlight, 0.0);
         self.open_parallel();
     }
@@ -779,7 +777,6 @@ impl ReaderApp {
         let hover = ui.ctx().pointer_hover_pos();
         let mut rects: Vec<(Reference, Rect)> = Vec::new();
         let mut hovered = None;
-
         for placement in &frame.placements {
             let Some(layout) = self.reader.layout(placement.book, placement.chapter) else {
                 continue;
@@ -941,7 +938,6 @@ impl ReaderApp {
         let hover = ctx.pointer_hover_pos();
         let mut rects: Vec<(Reference, Rect)> = Vec::new();
         let mut hovered = None;
-
         for column in 0..columns {
             let x = left + column as f32 * (width + gap);
             let Some(layout) = grid.layouts().get(column) else {

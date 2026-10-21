@@ -168,20 +168,6 @@ fn column_typography(ty: &Typography) -> Typography {
     }
 }
 
-/// The shared scroll anchor, in the same shape the reader uses.
-///
-/// One anchor serves every column, so there is nothing per column to keep in
-/// step. The chapter is chapter-only, and the offset is a distance in points
-/// from that chapter's top edge. Parallel mode is entered with the reader's
-/// anchor and offset, which is why leaving it is exact.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Anchor {
-    /// The chapter the viewport's top edge sits in.
-    pub reference: Reference,
-    /// The offset of the viewport's top edge inside that chapter.
-    pub offset: f32,
-}
-
 /// The parallel reading surface.
 ///
 /// It owns the columns, the shared anchor, and the layout cache. The caller
@@ -397,6 +383,9 @@ impl ParallelView {
             .map(|layout| verse_blocks(layout, count))
             .collect();
 
+        // A small gap after each row keeps a selected verse's fill off the last
+        // line of the verse above it without breaking the verse alignment.
+        let gap = ty.line_spacing() * 0.28;
         let mut rows = Vec::with_capacity(count as usize);
         let mut top = 0.0_f32;
         for verse in 1..=count as u8 {
@@ -418,7 +407,7 @@ impl ParallelView {
                 height
             } else {
                 ty.line_spacing()
-            };
+            } + gap;
             rows.push(ParallelRow {
                 verse,
                 reference: Reference {

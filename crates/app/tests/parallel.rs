@@ -417,7 +417,7 @@ fn the_parallel_shot_starts_at_the_demo_chapter_with_its_marks() {
     );
     assert_eq!(
         harness.state().selected_verse(),
-        Some(Reference::new(42, 3, Some(16)).expect("John 3:16 is canonical")),
+        Some(Reference::new(42, 3, Some(3)).expect("John 3:3 is canonical")),
         "the demo highlight is not selected"
     );
 }
