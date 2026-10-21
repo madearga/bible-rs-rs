@@ -158,3 +158,43 @@ fn an_oversized_raw_text_index_is_refused() {
     assert!(message.contains("48001 records"), "{message}");
     assert!(message.contains("limit"), "{message}");
 }
+
+/// A translation file header with a chosen metadata length and body length.
+fn bbl_header(meta_len: u32, meta: &[u8], body_len: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"BIBL");
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&meta_len.to_le_bytes());
+    bytes.extend_from_slice(meta);
+    bytes.extend_from_slice(&body_len.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn a_body_that_declares_a_huge_length_is_refused_before_decompressing() {
+    let meta = serde_json::to_vec(&TranslationMeta::new("x", "X")).expect("metadata");
+    let mut bytes = bbl_header(meta.len() as u32, &meta, u32::MAX);
+    // A single zstd frame is enough for the decoder to start; the declared
+    // length alone must be refused before any output is produced.
+    bytes.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd]);
+
+    let error = bible_core::format::decode(&bytes).expect_err("the huge body is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("body declares"), "{message}");
+    assert!(message.contains("limit"), "{message}");
+}
+
+#[test]
+fn a_metadata_length_past_the_limit_is_refused() {
+    let bytes = bbl_header(u32::MAX, &[], 0);
+    let error = bible_core::format::decode(&bytes).expect_err("the huge header is refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("metadata header"), "{message}");
+    assert!(message.contains("limit"), "{message}");
+
+    let error = bible_core::format::read_meta(&bytes).expect_err("listing refuses it too");
+    assert!(
+        format!("{error:#}").contains("metadata header"),
+        "{error:#}"
+    );
+}
