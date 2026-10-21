@@ -777,6 +777,7 @@ impl ReaderApp {
         let hover = ui.ctx().pointer_hover_pos();
         let mut rects: Vec<(Reference, Rect)> = Vec::new();
         let mut hovered = None;
+
         for placement in &frame.placements {
             let Some(layout) = self.reader.layout(placement.book, placement.chapter) else {
                 continue;
