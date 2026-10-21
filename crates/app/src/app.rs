@@ -18,6 +18,7 @@ use bible_core::Translation;
 use bible_core::books;
 use bible_core::search::Corpus;
 use bible_core::study::{Settings, Store, Theme as StoredTheme};
+use bible_core::{Bookmark, HighlightColour};
 use eframe::egui;
 use egui::{Align, FontId, Pos2, Rect, RichText, Stroke, pos2, vec2};
 
@@ -29,6 +30,7 @@ use crate::reader::Reader;
 use crate::search_panel::SearchPanel;
 use crate::selection::{self, Selection};
 use crate::shortcuts::{self, Action, Combo, Key as ShortcutKey};
+use crate::sidebar::{self, MarginMarkers, Row};
 use crate::theme::{self, Palette, Theme, Typography};
 use crate::typography;
 use crate::verse_menu::{CompareRow, MenuAction, VerseMenu};
@@ -68,6 +70,8 @@ pub struct ReaderApp {
     search: SearchPanel,
     menu: VerseMenu,
     study: Store,
+    study_sidebar_open: bool,
+    study_rows: Vec<Row>,
     corpus: Option<(String, Corpus)>,
     flash: Option<(Reference, f64)>,
     overlay: bool,
@@ -279,6 +283,8 @@ impl ReaderApp {
             search: SearchPanel::new(),
             menu: VerseMenu::new(),
             study,
+            study_sidebar_open: false,
+            study_rows: Vec::new(),
             corpus: None,
             flash: None,
             overlay: false,
@@ -310,7 +316,60 @@ impl ReaderApp {
                 self.menu.open_at(target);
             }
             ShotView::Shortcuts => self.overlay = true,
+            ShotView::StudySidebar => self.show_demo_study_sidebar(),
         }
+    }
+
+    /// Opens the study sidebar with a synthetic mark of each kind.
+    ///
+    /// This is the state the render harness photographs. It writes only to the
+    /// store the harness opened in a scratch folder, never to a reader's data.
+    fn show_demo_study_sidebar(&mut self) {
+        let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is a canonical verse");
+        let note = Reference::new(42, 3, Some(17)).expect("John 3:17 is a canonical verse");
+        let bookmark = Reference::new(42, 3, Some(18)).expect("John 3:18 is a canonical verse");
+        if let Err(error) = self
+            .study
+            .set_highlight(highlight, Some(HighlightColour::Yellow))
+        {
+            self.status = format!("cannot seed the sidebar highlight: {error:#}");
+        }
+        if let Err(error) = self
+            .study
+            .set_note(note, "A synthetic note for the sidebar shot")
+        {
+            self.status = format!("cannot seed the sidebar note: {error:#}");
+        }
+        if let Err(error) = self
+            .study
+            .set_bookmark(bookmark, Some(Bookmark::with_label("synthetic bookmark")))
+        {
+            self.status = format!("cannot seed the sidebar bookmark: {error:#}");
+        }
+        // The harness may open on a remembered place, so move the demo page to
+        // the chapter its synthetic marks belong to.
+        self.navigate(highlight, 0.0);
+        self.study_sidebar_open = true;
+        self.refresh_study_rows();
+    }
+
+    /// Opens the study sidebar, or closes it when it is already open.
+    ///
+    /// Opening rebuilds the row cache from one store snapshot. While the
+    /// sidebar is open its rows are rebuilt after a successful study edit, not
+    /// on every frame.
+    pub fn toggle_study_sidebar(&mut self) {
+        if self.study_sidebar_open {
+            self.study_sidebar_open = false;
+        } else {
+            self.study_sidebar_open = true;
+            self.refresh_study_rows();
+        }
+    }
+
+    /// Rebuilds the sidebar row cache from the store's mirror.
+    fn refresh_study_rows(&mut self) {
+        self.study_rows = sidebar::rows_from_snapshot(&self.study.snapshot());
     }
 
     /// Switches the page to another translation, keeping the reading position.
@@ -380,6 +439,26 @@ impl ReaderApp {
         self.menu.is_open()
     }
 
+    /// Whether the study sidebar is on screen.
+    pub fn study_sidebar_is_open(&self) -> bool {
+        self.study_sidebar_open
+    }
+
+    /// The cached rows the study sidebar is showing.
+    pub fn study_rows(&self) -> &[Row] {
+        &self.study_rows
+    }
+
+    /// The study mark state of one verse, which the margin indicators paint.
+    pub fn margin_markers(&self, reference: Reference) -> MarginMarkers {
+        sidebar::margin_markers(&self.study, reference)
+    }
+
+    /// The verse the reader last selected, which a study jump sets.
+    pub fn selected_verse(&self) -> Option<Reference> {
+        self.selection.focus()
+    }
+
     /// The place the reader was, which the history also holds.
     pub fn history_current(&self) -> Option<Reference> {
         self.history.current()
@@ -389,6 +468,27 @@ impl ReaderApp {
     fn paint(&mut self, ui: &mut egui::Ui) {
         let palette = self.theme.palette();
         self.paint_toolbar(ui, palette);
+
+        let mut study_jump = None;
+        if self.study_sidebar_open {
+            let rows = &self.study_rows;
+            egui::Panel::right("study-sidebar")
+                .resizable(false)
+                .default_size(240.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(palette.paper)
+                        .inner_margin(12)
+                        .stroke(Stroke::new(1.0, palette.rule)),
+                )
+                .show(ui, |ui| {
+                    study_jump = sidebar::show(ui, rows, palette);
+                });
+        }
+        if let Some(reference) = study_jump {
+            let now = ui.ctx().input(|input| input.time);
+            self.navigate(reference, now);
+        }
 
         egui::Panel::bottom("status")
             .frame(egui::Frame::NONE.fill(palette.paper).inner_margin(8))
@@ -441,6 +541,9 @@ impl ReaderApp {
                         }
                         if ui.button("Jump").clicked() {
                             self.palette.open();
+                        }
+                        if ui.button("Study").clicked() {
+                            self.toggle_study_sidebar();
                         }
                     });
                 });
@@ -536,6 +639,24 @@ impl ReaderApp {
                 );
 
                 if let Some(reference) = line.verse {
+                    let markers = sidebar::margin_markers(&self.study, reference);
+                    if markers.note {
+                        ui.painter().circle_filled(
+                            pos2(left - 10.0, line_top + line.height * 0.5),
+                            2.5,
+                            palette.accent,
+                        );
+                    }
+                    if markers.bookmark {
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(
+                                pos2(left - 6.0, line_top + line.height * 0.25),
+                                vec2(2.0, line.height * 0.5),
+                            ),
+                            1.0,
+                            palette.muted,
+                        );
+                    }
                     if let Some((flash, until)) = self.flash
                         && flash == reference
                         && ui.ctx().input(|input| input.time) < until
@@ -894,6 +1015,9 @@ impl ReaderApp {
         match self.menu.apply(action, &mut self.study, &self.translation) {
             Ok(outcome) => {
                 self.status = outcome.message;
+                if self.study_sidebar_open {
+                    self.refresh_study_rows();
+                }
                 if let Some(text) = outcome.clipboard {
                     ctx.copy_text(text);
                 }
@@ -1199,6 +1323,8 @@ pub enum ShotView {
     VerseMenu,
     /// The keyboard shortcut overlay.
     Shortcuts,
+    /// The study sidebar, with one synthetic mark of each kind.
+    StudySidebar,
 }
 
 impl ShotView {
@@ -1210,6 +1336,7 @@ impl ShotView {
             "picker" => Some(Self::Picker),
             "menu" | "verse-menu" => Some(Self::VerseMenu),
             "shortcuts" | "overlay" => Some(Self::Shortcuts),
+            "sidebar" | "study-sidebar" => Some(Self::StudySidebar),
             _ => None,
         }
     }
@@ -1269,7 +1396,8 @@ impl ShotSpec {
     /// - `SHOT_REFERENCE` is any reference the reader understands.
     /// - `SHOT_TRANSLATION` is a translation id, or `sample` for the synthetic
     ///   page the harness uses as a baseline.
-    /// - `SHOT_DEMO` opens `palette`, `search`, `picker`, `menu`, or `shortcuts`.
+    /// - `SHOT_DEMO` opens `palette`, `search`, `picker`, `menu`, `shortcuts`,
+    ///   or `sidebar`.
     /// - `SHOT_CLICK` and `SHOT_HOVER` are `X,Y` points in points.
     /// - `SHOT_PAUSE` is a wait in milliseconds before the picture.
     /// - `SHOT_FILMSTRIP` is the number of frames to write.
@@ -1361,13 +1489,23 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
     let reference = spec.reference;
     let translation = spec.translation.clone();
     let view = spec.view;
+    // The sidebar demo writes study marks, so it must open a store in a scratch
+    // folder rather than the one a reader has on this machine.
+    let sidebar_data = match view {
+        Some(ShotView::StudySidebar) => Some(shot_scratch_dir()?),
+        _ => None,
+    };
     let mut harness = egui_kittest::Harness::builder()
         .with_size(size)
         .with_pixels_per_point(1.0)
         .wgpu()
         .build_eframe(move |cc| {
-            let mut app =
-                ReaderApp::open_with_translation(cc, theme, reference, translation.as_deref());
+            let mut app = match &sidebar_data {
+                Some(data) => ReaderApp::open_at(cc, theme, reference, data),
+                None => {
+                    ReaderApp::open_with_translation(cc, theme, reference, translation.as_deref())
+                }
+            };
             if let Some(view) = view {
                 app.set_view(view);
             }
@@ -1414,6 +1552,19 @@ pub fn render_shot(spec: &ShotSpec) -> Result<Vec<PathBuf>> {
         written.push(path);
     }
     Ok(written)
+}
+
+/// A unique scratch data folder for a shot that writes study marks.
+fn shot_scratch_dir() -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir =
+        std::env::temp_dir().join(format!("bible-sidebar-shot-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create the shot folder {}", dir.display()))?;
+    Ok(dir)
 }
 
 /// Writes an image as a PNG, creating the folder it lives in.
