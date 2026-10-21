@@ -16,7 +16,7 @@ use std::sync::mpsc;
 
 use bible_app::macos_menu::{
     Item, KEYBOARD_ONLY, accelerator_for, action_for_id, code_for, drain_actions, menu_id,
-    menu_spec, route,
+    menu_key, menu_spec, route,
 };
 use bible_app::shortcuts::{Action, Combo, Key, SHORTCUTS, combo_for};
 use muda::accelerator::{Accelerator, Code, Modifiers};
@@ -219,9 +219,38 @@ fn every_shortcut_has_exactly_one_menu_item_or_is_declared_keyboard_only() {
 }
 
 #[test]
+fn a_plain_key_is_not_a_menu_accelerator() {
+    // AppKit gives an unmodified item the whole keyboard, so these keep their
+    // key through the keyboard handler and show no accelerator in the menu.
+    for action in [
+        Action::ExportMarkdown,
+        Action::PreviousChapter,
+        Action::NextChapter,
+    ] {
+        assert!(
+            combo_for(action).is_some_and(|combo| !combo.command && !combo.option),
+            "{action:?} is expected to have a plain table combination"
+        );
+        assert_eq!(
+            menu_key(action),
+            None,
+            "{action:?} would capture a plain key"
+        );
+    }
+    for (menu, _action, label, key) in command_items() {
+        if let Some(combo) = key {
+            assert!(
+                combo.command || combo.option,
+                "{menu} item {label} claims the unmodified key {combo:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_menu_accelerator_matches_the_shortcut_table() {
     for (menu, action, label, key) in command_items() {
-        let table = combo_for(action);
+        let table = menu_key(action);
         assert_eq!(
             key, table,
             "{menu} item {label} shows {key:?}, the table says {table:?}"

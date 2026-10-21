@@ -50,9 +50,21 @@ impl Item {
         Self::Action {
             action,
             label: label.to_owned(),
-            key: combo_for(action),
+            key: menu_key(action),
         }
     }
+}
+
+/// The key equivalent a menu item may show for an action.
+///
+/// AppKit gives a menu item without a modifier the whole keyboard, so a plain
+/// letter or arrow from the table would take that key away from every text
+/// field in the window, including the note editor and the search box. Such an
+/// action keeps its menu item and keeps its key through the keyboard handler,
+/// and the item shows no accelerator rather than a combination that would do
+/// something else.
+pub fn menu_key(action: Action) -> Option<Combo> {
+    combo_for(action).filter(|combo| combo.command || combo.option)
 }
 
 /// The items AppKit provides and handles itself.
