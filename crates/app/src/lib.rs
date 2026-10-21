@@ -229,10 +229,7 @@ impl Library {
     /// The file is named after the translation's own identifier, so installing
     /// the same translation twice replaces it rather than duplicating it.
     pub fn install(&mut self, translation: &Translation) -> Result<PathBuf> {
-        let id = translation.meta().id.as_str();
-        if id.is_empty() {
-            bail!("a translation needs an identifier before it can be installed");
-        }
+        let id = checked_id(&translation.meta().id)?;
         let folder = translations_dir(&self.dir);
         fs::create_dir_all(&folder)
             .with_context(|| format!("cannot create {}", folder.display()))?;
@@ -251,6 +248,23 @@ impl Library {
         });
         self.installed.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
         Ok(path)
+    }
+}
+
+/// Checks that an identifier is one plain file name.
+///
+/// The identifier names the installed file, so a value that carries a path
+/// separator, a parent link, or a root would let an install write outside the
+/// translations folder. Only a single normal component is accepted, which also
+/// rejects the empty name and the two relative names that mean a folder.
+fn checked_id(id: &str) -> Result<&str> {
+    if id.is_empty() {
+        bail!("a translation needs an identifier before it can be installed");
+    }
+    let mut components = Path::new(id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) if name.to_str() == Some(id) => Ok(id),
+        _ => bail!("the translation identifier {id:?} is not a plain file name"),
     }
 }
 
