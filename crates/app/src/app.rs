@@ -462,7 +462,7 @@ impl ReaderApp {
             if ids.len() == MAX_COLUMNS {
                 break;
             }
-            if !ids.iter().any(|seen| *seen == installed.meta.id) {
+            if !ids.contains(&installed.meta.id) {
                 ids.push(installed.meta.id.clone());
             }
         }
