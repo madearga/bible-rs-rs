@@ -152,6 +152,26 @@ def closure(metadata: dict) -> list[dict]:
     )
 
 
+def runtime_packages(target: str | None = None) -> list[dict]:
+    """The crates in the binary's runtime closure for a target."""
+    target = target or host_target()
+    metadata = json.loads(
+        run(
+            [
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--locked",
+                "--offline",
+                "--filter-platform",
+                target,
+            ]
+        )
+    )
+    return closure(metadata)
+
+
 def cargo_home() -> pathlib.Path:
     return pathlib.Path(os.environ.get("CARGO_HOME", pathlib.Path.home() / ".cargo"))
 
@@ -361,15 +381,17 @@ def main() -> int:
 
     output = pathlib.Path(args.output)
 
-    # The check validates the committed index and that every file it names is
-    # present. It does not re-resolve the dependency closure, so it works
-    # offline and in a checkout where the registry has been cleaned.
+    # The check resolves the current runtime closure and compares every
+    # dependency identity against the index, so a crate that enters the binary
+    # without a notice fails the check. It also verifies that every file the
+    # index names is present.
     if args.check:
         index = output / "INDEX.md"
         if not index.is_file():
             print(f"missing notice index: {index}", file=sys.stderr)
             return 1
         missing = []
+        indexed = set()
         rows = 0
         for line in index.read_text(encoding="utf-8").splitlines():
             if not line.startswith("| `"):
@@ -378,11 +400,26 @@ def main() -> int:
             if len(cells) < 5:
                 continue
             rows += 1
+            crate = re.findall(r"`([^`]+)`", cells[1])
+            version = cells[2].strip()
+            if len(crate) == 1:
+                indexed.add((crate[0], version))
             for name in re.findall(r"`([^`]+)`", cells[4]):
                 if not (output / name).is_file():
                     missing.append(name)
         if rows == 0:
             missing.append("INDEX.md names no crate notices")
+        try:
+            packages = runtime_packages(args.target)
+        except (subprocess.CalledProcessError, SystemExit) as error:
+            print(f"cannot resolve the runtime dependency closure: {error}", file=sys.stderr)
+            return 1
+        for package in packages:
+            identity = (package["name"], package["version"])
+            if identity not in indexed:
+                missing.append(
+                    f"{package['name']} {package['version']}: in the runtime closure but absent from INDEX.md"
+                )
         for filename, _description in [(pathlib.Path(path).name, d) for path, d in PROJECT_FILES]:
             if not (output / filename).is_file():
                 missing.append(filename)
@@ -403,22 +440,7 @@ def main() -> int:
         print(f"every notice named by {index} is in {output}")
         return 0
 
-    target = args.target or host_target()
-    metadata = json.loads(
-        run(
-            [
-                "cargo",
-                "metadata",
-                "--format-version",
-                "1",
-                "--locked",
-                "--offline",
-                "--filter-platform",
-                target,
-            ]
-        )
-    )
-    packages = closure(metadata)
+    packages = runtime_packages(args.target)
     standard = standard_texts()
 
     if output.exists():

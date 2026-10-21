@@ -43,6 +43,8 @@ binary, not a legal opinion.
 | `core-graphics-types` | 0.1.3 | MIT OR Apache-2.0 | `core-graphics-types-0.1.3-LICENSE-APACHE`, `core-graphics-types-0.1.3-LICENSE-MIT` |
 | `cpufeatures` | 0.2.17 | MIT OR Apache-2.0 | `cpufeatures-0.2.17-LICENSE-APACHE`, `cpufeatures-0.2.17-LICENSE-MIT` |
 | `crc32fast` | 1.5.3 | MIT OR Apache-2.0 | `crc32fast-1.5.3-LICENSE-APACHE`, `crc32fast-1.5.3-LICENSE-MIT` |
+| `crossbeam-channel` | 0.5.17 | MIT OR Apache-2.0 | `crossbeam-channel-0.5.17-LICENSE-APACHE`, `crossbeam-channel-0.5.17-LICENSE-MIT`, `crossbeam-channel-0.5.17-LICENSE-THIRD-PARTY` |
+| `crossbeam-utils` | 0.8.23 | MIT OR Apache-2.0 | `crossbeam-utils-0.8.23-LICENSE-APACHE`, `crossbeam-utils-0.8.23-LICENSE-MIT` |
 | `crypto-common` | 0.1.7 | MIT OR Apache-2.0 | `crypto-common-0.1.7-LICENSE-APACHE`, `crypto-common-0.1.7-LICENSE-MIT` |
 | `cursor-icon` | 1.2.0 | MIT OR Apache-2.0 OR Zlib | `cursor-icon-1.2.0-LICENSE-APACHE`, `cursor-icon-1.2.0-LICENSE-MIT`, `cursor-icon-1.2.0-LICENSE-ZLIB` |
 | `digest` | 0.10.7 | MIT OR Apache-2.0 | `digest-0.10.7-LICENSE-APACHE`, `digest-0.10.7-LICENSE-MIT` |
@@ -103,6 +105,7 @@ binary, not a legal opinion.
 | `indexmap` | 2.14.2 | Apache-2.0 OR MIT | `indexmap-2.14.2-LICENSE-APACHE`, `indexmap-2.14.2-LICENSE-MIT` |
 | `itertools` | 0.15.0 | MIT OR Apache-2.0 | `itertools-0.15.0-LICENSE-APACHE`, `itertools-0.15.0-LICENSE-MIT` |
 | `itoa` | 1.0.18 | MIT OR Apache-2.0 | `itoa-1.0.18-LICENSE-APACHE`, `itoa-1.0.18-LICENSE-MIT` |
+| `keyboard-types` | 0.8.3 | MIT OR Apache-2.0 | `keyboard-types-0.8.3-LICENSE-APACHE`, `keyboard-types-0.8.3-LICENSE-MIT` |
 | `khronos-egl` | 6.0.0 | MIT/Apache-2.0 | `khronos-egl-6.0.0-LICENSE-APACHE`, `khronos-egl-6.0.0-LICENSE-MIT` |
 | `kittest` | 0.4.0 | MIT OR Apache-2.0 | `kittest-0.4.0-LICENSE-APACHE`, `kittest-0.4.0-LICENSE-MIT` |
 | `kurbo` | 0.13.1 | Apache-2.0 OR MIT | `kurbo-0.13.1-LICENSE-APACHE`, `kurbo-0.13.1-LICENSE-MIT` |
@@ -119,6 +122,7 @@ binary, not a legal opinion.
 | `miniz_oxide` | 0.8.9 | MIT OR Zlib OR Apache-2.0 | `miniz_oxide-0.8.9-LICENSE`, `miniz_oxide-0.8.9-LICENSE-APACHE.md`, `miniz_oxide-0.8.9-LICENSE-MIT.md`, `miniz_oxide-0.8.9-LICENSE-ZLIB.md` |
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | `miniz_oxide-0.9.1-LICENSE`, `miniz_oxide-0.9.1-LICENSE-APACHE.md`, `miniz_oxide-0.9.1-LICENSE-MIT.md`, `miniz_oxide-0.9.1-LICENSE-ZLIB.md` |
 | `moxcms` | 0.8.1 | BSD-3-Clause OR Apache-2.0 | `moxcms-0.8.1-LICENSE-APACHE.md`, `moxcms-0.8.1-LICENSE.md` |
+| `muda` | 0.21.2 | Apache-2.0 OR MIT | `muda-0.21.2-LICENSE-APACHE`, `muda-0.21.2-LICENSE-MIT`, `muda-0.21.2-LICENSE.spdx` |
 | `naga` | 30.0.1 | MIT OR Apache-2.0 | `naga-30.0.1-LICENSE.APACHE`, `naga-30.0.1-LICENSE.MIT` |
 | `naga-types` | 30.0.1 | MIT OR Apache-2.0 | `naga-types-30.0.1-LICENSE.APACHE`, `naga-types-30.0.1-LICENSE.MIT` |
 | `nohash-hasher` | 0.2.0 | Apache-2.0 OR MIT | `nohash-hasher-0.2.0-LICENSE-APACHE`, `nohash-hasher-0.2.0-LICENSE-MIT` |
