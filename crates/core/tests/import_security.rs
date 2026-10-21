@@ -283,3 +283,30 @@ fn a_verse_stops_at_the_representable_text_limit() {
         "the accumulated text stops at the u16 limit"
     );
 }
+
+#[test]
+fn repeated_verse_records_cannot_pass_the_text_budget() {
+    let scratch = Scratch::new("text-budget");
+    write_manifest(&scratch);
+
+    // Nine four megabyte blocks fit the block budget, but six hundred records
+    // that each take 65,535 bytes ask for more verse text than the module may
+    // produce, so the budget stops them before the strings are made.
+    let plain = vec![b'a'; 4 * 1024 * 1024];
+    let compressed = deflate(&plain);
+    let mut index = Vec::new();
+    for offset in 0..600u32 {
+        let block = offset % 9;
+        index.extend_from_slice(&verse_record(block, 0, 65_535));
+    }
+    let mut sizes = Vec::new();
+    for _ in 0..9 {
+        sizes.extend_from_slice(&block_record(compressed.len() as u32, 4 * 1024 * 1024));
+    }
+    write_ztext(&scratch, &index, &compressed, &sizes);
+
+    let error = imported(&scratch.path).expect_err("the text budget is enforced");
+    let message = format!("{error:#}");
+    assert!(message.contains("verse text"), "{message}");
+    assert!(message.contains("limit"), "{message}");
+}
