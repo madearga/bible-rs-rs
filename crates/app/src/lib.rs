@@ -27,6 +27,7 @@ pub mod bundled;
 pub mod cli;
 pub mod history;
 pub mod palette;
+pub mod parallel;
 pub mod reader;
 pub mod search_panel;
 pub mod selection;
