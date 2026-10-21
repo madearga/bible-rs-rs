@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright (c) 2026 madearga -->
+
 # Bible reader
 
 A native macOS Bible reader. It opens a window, reads the whole Bible, searches
@@ -9,6 +12,42 @@ app has scripture on a machine that has never installed anything.
 
 This is a development build. There is no release, no notarized build, and no
 signed installer.
+
+## What it does
+
+- Seven public-domain English translations are compiled into the binary. They
+  are the King James Version (`kjv`), the World English Bible (`web`), the
+  Berean Standard Bible (`bsb`), the American Standard Version (`asv`), Young's
+  Literal Translation (`ylt`), the Darby Bible (`darby`), and the Webster Bible
+  (`webster`). All seven are readable and searchable.
+- The reader scrolls continuously through the whole Bible. Each chapter is laid
+  out once and kept in a layout cache, so scrolling from Genesis to Revelation
+  costs the same per frame as scrolling inside one psalm.
+- A jump palette opens on command-K, a search panel on command-F, and a book
+  and chapter picker on command-B.
+- Highlights in six colours, notes, and bookmarks live in one SQLite file in the
+  data folder. Every record is keyed by a reference in the canonical verse grid,
+  so a mark follows the reader from one translation to another.
+- A study sidebar lists every highlight, note, and bookmark, and a verse that
+  carries one shows a margin mark beside it.
+- A verse menu offers highlight, note, bookmark, copy, copy with the reference,
+  and compare across translations.
+- Three themes, light, sepia, and dark, and an adjustable text size, line
+  spacing, line length, justification, verse numbers, section headings,
+  paragraph mode, and words of Christ in red. Every one of those settings is
+  written to the study database and restored on the next launch.
+- A Settings window, reachable from the macOS menu bar, edits the theme and the
+  typography.
+- A native macOS menu bar, built through AppKit. It has no Edit menu, so the
+  copy and paste keys still belong to the text fields.
+- A parallel view that shows two or three translations side by side, verse
+  aligned, with a translation picker on each column.
+- Export of the study data to JSON and Markdown, and import of that JSON back.
+  The window and the command line read and write the same SQLite database.
+- A command line with the `read`, `search`, `import`, `translations`, `export`,
+  and `import-study` verbs.
+- A macOS application bundle built by `scripts/bundle-macos.sh` and checked by
+  `scripts/verify-distribution.sh`.
 
 ## Build the app bundle
 
@@ -110,15 +149,15 @@ is, which is how the tests keep their data out of yours.
 | macOS | `~/Library/Application Support/BibleReader` |
 | Linux and other Unix | `$XDG_DATA_HOME/bible-reader`, or `~/.local/share/bible-reader` |
 
-The folder holds the study database `study.db`, the translations you install
-yourself under `translations/`, and nothing else. Deleting the folder resets
-the app. It never leaves your machine.
+The folder holds the study database `study.db` together with its SQLite side
+files, the translations you install yourself under `translations/`, and the
+exports the window writes there. Deleting the folder resets the app. It never
+leaves your machine.
 
-The `export` and `import-study` verbs work on a JSON file rather than on the
-SQLite database, so an export taken from the window and an export taken from
-the command line do not see the same data. The window's own **Export** action
-writes `study.md` or `study.json` into the data folder from the live store, so
-use that one when you want the window's data.
+The `export` and `import-study` verbs open the same SQLite database the window
+uses, so an export taken from the command line carries the same records as the
+window's own **Export** action. The window writes `study.md` or `study.json`
+into the data folder, and the command line writes to the path you give it.
 
 ## The command line
 
@@ -139,7 +178,7 @@ Bible import-study ./study.json
 |---|---|
 | `read <reference>` | Prints a verse, or a whole chapter when the reference names no verse |
 | `search <query>` | Prints the verses that match |
-| `import <path>` | Installs a translation file |
+| `import <path>` | Installs a translation file. `--id <id>` names a plain text import |
 | `translations` | Lists the bundled translations and the installed ones |
 | `export <path>` | Writes the study data out as JSON or Markdown |
 | `import-study <path>` | Reads exported study data back |
@@ -153,7 +192,7 @@ when the arguments did not name a verb.
 The `import` verb reads the app's own binary format and plain text in the
 `Reference<TAB>text` form. It does not read USFM, OSIS, Zefania, or SWORD
 files. The core crate has importers for those four formats, and they are
-covered by the core test suite, but the application does not yet call them.
+covered by the core test suite, but the application does not call them.
 
 ## Keyboard
 
@@ -165,21 +204,33 @@ The reader answers to the keyboard.
 | command-F | Search |
 | command-B | Book and chapter picker |
 | command-1 to command-9 | Switch to the nth translation |
-| command-[ and command-] | Back and forward |
-| option-left and option-right | Back and forward |
-| left and right | Previous and next chapter |
+| command-[ | Back |
+| command-] | Forward |
+| option-left | Back |
+| option-right | Forward |
+| left | Previous chapter |
+| right | Next chapter |
 | 1 to 6 | Highlight the selected verse in that colour |
 | 0 | Clear the highlight |
 | N | Write a note |
-| B or command-D | Bookmark |
+| B | Toggle a bookmark |
+| command-D | Toggle a bookmark |
 | command-C | Copy the selected verse |
 | shift-command-C | Copy the selected verse with its reference |
 | C | Compare the selected verse across translations |
 | E | Export the study data to Markdown |
 | shift-command-E | Export the study data to JSON |
 | command-R | Toggle the words of Christ in red |
-| command-shift-L | Cycle the theme |
-| command-plus, command-minus, command-0 | Text size |
+| shift-command-L | Cycle the theme |
+| command-plus | Larger text |
+| command-minus | Smaller text |
+| command-0 | Default text size |
+
+The table above is the one in `crates/app/src/shortcuts.rs`. The verse numbers,
+the section headings, the Settings window, and the shortcut overlay have no key
+and are reachable from the menu bar. The parallel view is toggled from the
+**Parallel** button in the toolbar, and the study sidebar from the **Study**
+button beside it.
 
 The themes are light, sepia, and dark. Set `BIBLE_THEME` to `light`, `sepia`, or
 `dark` to pick the one the window opens with.
@@ -195,6 +246,9 @@ the data directory.
 
 - The seven translations are compiled into the binary and decoded the first
   time you open one.
+- The chapter layout is cached per chapter, size, and mode, so a chapter that has
+  been laid out once is painted from the cache until the size or the typography
+  changes.
 - The search corpus is built in memory when you search. Nothing is written to
   disk and no index file is kept.
 - Your study data is a SQLite file in the data directory. It is never
@@ -207,13 +261,11 @@ roadmap.
 
 - **No online translations.** The app does not fetch a translation from an
   online API, and there is no code path that tries.
-- **No iOS or Android build.** The bundle script builds a macOS application
-  bundle and refuses to run anywhere else.
+- **No iOS, Android, or Windows build.** `scripts/bundle-macos.sh` builds a
+  macOS application bundle and refuses to run anywhere else.
 - **No notarized or signed release.** The bundle carries an ad-hoc signature
   so macOS will run it locally. There is no developer identity, no
   notarization, and no notarized download.
-- **No native menu bar, study sidebar, or parallel translations view.** These
-  are in flight in a separate branch and are not in this build.
 - **The SWORD importer does not decipher encrypted modules.** It reads the
   zText and RawText drivers and the OSIS, ThML, and GBF markup dialects, and it
   refuses a locked module with a message rather than reading it as garbage.
@@ -221,17 +273,14 @@ roadmap.
   the canonical grid by chapter and verse count, so a module whose NRSV
   numbering differs from the KJV grid lands in the wrong place for the books
   where the two disagree. Treat an NRSV-versified import as approximate.
-- **The application never calls the core importers.** The USFM, OSIS, Zefania,
-  and SWORD importers exist in `crates/core` and are tested there. The
-  application has no route to them yet, so the `import` verb handles only the
-  app's own binary format and plain text.
-- **No preference panel.** The theme, the text size, and the reading position
-  are all stored in the study database, but only the reading position is read
-  back on launch. The theme and the text size come from the environment
-  variables `BIBLE_THEME` and the defaults, and there is no window for changing
-  them yet.
+- **The application does not call the core importers for USFM, OSIS, Zefania,
+  or SWORD files.** Those importers exist in `crates/core` and are tested
+  there, but the application has no route to them. The `import` verb handles
+  the app's own binary format and plain text only.
 - **No application icon.** The bundle falls back to the system's generic
   application icon.
+- **Study data is local to one machine.** The SQLite file is not synced,
+  exported to a service, or shared between machines by the app.
 
 ## Layout of the repository
 
