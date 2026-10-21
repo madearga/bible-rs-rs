@@ -323,8 +323,10 @@ pub fn code_for(key: Key) -> Option<Code> {
 
 /// The receiving end of the menu bridge.
 ///
-/// muda reports a click from its own thread, so the action is sent through a
-/// channel and read on the frame that follows. The app drains it once per frame.
+/// muda delivers a click while the window is idle, so the action is sent through
+/// a channel, the window is asked for a frame, and the app drains the channel at
+/// the top of that frame. Without the repaint request a menu item would wait for
+/// the next pointer or key event before it took effect.
 static ACTIONS: OnceLock<Mutex<Option<mpsc::Receiver<Action>>>> = OnceLock::new();
 
 /// Builds the menu bar, attaches it to the application, and starts the bridge.
@@ -333,7 +335,7 @@ static ACTIONS: OnceLock<Mutex<Option<mpsc::Receiver<Action>>>> = OnceLock::new(
 /// the first frame is drawn. A plain binary launched from a terminal gets the
 /// same menu as a bundled application, because AppKit owns the menu bar rather
 /// than the window.
-pub fn install() -> muda::Result<()> {
+pub fn install(repaint: eframe::egui::Context) -> muda::Result<()> {
     let spec = menu_spec();
     let root = muda::Menu::new();
     for menu in &spec {
@@ -356,8 +358,10 @@ pub fn install() -> muda::Result<()> {
 
     let (sender, receiver) = mpsc::channel();
     let routed = spec.clone();
+    let waking = repaint.clone();
     muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
         route(event.id().as_ref(), &routed, &sender);
+        waking.request_repaint();
     }));
     let slot = ACTIONS.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(receiver);

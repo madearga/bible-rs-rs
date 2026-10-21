@@ -62,7 +62,8 @@ fn launch() -> Result<()> {
             // place as soon as the window is. A plain binary run from a
             // terminal gets the same menu as a bundled application.
             #[cfg(target_os = "macos")]
-            bible_app::macos_menu::install().context("the menu bar did not install")?;
+            bible_app::macos_menu::install(cc.egui_ctx.clone())
+                .context("the menu bar did not install")?;
             Ok(Box::new(ReaderApp::open(cc, theme, reference)))
         }),
     )
