@@ -189,10 +189,11 @@ are `kjv`, `web`, `bsb`, `asv`, `ylt`, `darby`, and `webster`.
 The exit code is zero when the verb succeeded, one when it failed, and two
 when the arguments did not name a verb.
 
-The `import` verb reads the app's own binary format and plain text in the
-`Reference<TAB>text` form. It does not read USFM, OSIS, Zefania, or SWORD
-files. The core crate has importers for those four formats, and they are
-covered by the core test suite, but the application does not call them.
+The `import` verb reads USFM, OSIS, Zefania, and SWORD source files, the
+app's own binary format, and plain text in the `Reference<TAB>text` form. It
+detects the format from the file, and the metadata flags name the translation
+it installs. The core importers keep their archive bounds, so a crafted file
+is refused rather than unpacked.
 
 ## Keyboard
 
@@ -273,10 +274,6 @@ roadmap.
   the canonical grid by chapter and verse count, so a module whose NRSV
   numbering differs from the KJV grid lands in the wrong place for the books
   where the two disagree. Treat an NRSV-versified import as approximate.
-- **The application does not call the core importers for USFM, OSIS, Zefania,
-  or SWORD files.** Those importers exist in `crates/core` and are tested
-  there, but the application has no route to them. The `import` verb handles
-  the app's own binary format and plain text only.
 - **No application icon.** The bundle falls back to the system's generic
   application icon.
 - **Study data is local to one machine.** The SQLite file is not synced,

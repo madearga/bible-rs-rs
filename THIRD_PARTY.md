@@ -235,8 +235,9 @@ the binary.
 
 The program spec in `docs/SPEC.md` describes this reader as a clean-room
 rewrite. This file does not claim that any legal conclusion follows from that
-description, and it does not claim that the reimplementation is
-line-by-line independent of any other implementation. What the repository
-shows is that the source in `crates/` was written for this repository, carries
-this project's SPDX headers, and does not copy source, comments, or distinctive
-naming from any other tree.
+term, and it does not claim that the implementation was written without
+studying another implementation: `docs/SPEC.md` explicitly allowed reading the
+reference implementation's algorithms. What the repository can show is that the
+source in `crates/` was written for this repository and carries this project's
+SPDX headers. It does not show, and this file does not claim, that no other
+implementation was read while the algorithms were designed.
