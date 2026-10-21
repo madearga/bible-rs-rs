@@ -30,6 +30,7 @@ use crate::parallel::{Column, MAX_COLUMNS, ParallelView};
 use crate::reader::Reader;
 use crate::search_panel::SearchPanel;
 use crate::selection::{self, Selection};
+use crate::settings::SettingsWindow;
 use crate::shortcuts::{self, Action, Combo, Key as ShortcutKey};
 use crate::sidebar::{self, MarginMarkers, Row};
 use crate::theme::{self, Palette, Theme, Typography};
@@ -70,6 +71,7 @@ pub struct ReaderApp {
     history: History,
     search: SearchPanel,
     menu: VerseMenu,
+    settings_window: SettingsWindow,
     study: Store,
     study_sidebar_open: bool,
     study_rows: Vec<Row>,
@@ -286,6 +288,7 @@ impl ReaderApp {
             history: History::new(start.chapter_only()),
             search: SearchPanel::new(),
             menu: VerseMenu::new(),
+            settings_window: SettingsWindow::new(),
             study,
             study_sidebar_open: false,
             study_rows: Vec::new(),
@@ -324,6 +327,7 @@ impl ReaderApp {
             ShotView::Shortcuts => self.overlay = true,
             ShotView::StudySidebar => self.show_demo_study_sidebar(),
             ShotView::Parallel => self.show_demo_parallel(),
+            ShotView::Settings => self.settings_window.open(),
         }
     }
 
@@ -593,6 +597,11 @@ impl ReaderApp {
     /// Whether the study sidebar is on screen.
     pub fn study_sidebar_is_open(&self) -> bool {
         self.study_sidebar_open
+    }
+
+    /// Whether the settings window is on screen.
+    pub fn settings_window_is_open(&self) -> bool {
+        self.settings_window.is_open()
     }
 
     /// The cached rows the study sidebar is showing.
@@ -1172,6 +1181,7 @@ impl ReaderApp {
         settings.show_verse_numbers = self.typography.verse_numbers;
         settings.show_headings = self.typography.headings;
         settings.words_of_christ_red = self.typography.red_letters;
+        settings.paragraph_mode = self.typography.paragraph_mode;
         if let Err(error) = self.study.set_settings(settings) {
             self.status = format!("cannot save the reader preferences: {error:#}");
         }
@@ -1215,7 +1225,11 @@ impl ReaderApp {
         if self.parallel.is_some() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.parallel = None;
         }
-        if self.palette.is_open() || self.search.is_open() || self.picker.is_open() {
+        if self.palette.is_open()
+            || self.search.is_open()
+            || self.picker.is_open()
+            || self.settings_window.is_open()
+        {
             return;
         }
         let combos: Vec<Combo> = ctx.input(|input| {
@@ -1367,9 +1381,7 @@ impl ReaderApp {
                 self.typography.headings = !self.typography.headings;
             }
             Action::ShowShortcuts => self.overlay = !self.overlay,
-            Action::Preferences => {
-                self.status = "the reading preferences live in the View menu".to_owned();
-            }
+            Action::Preferences => self.settings_window.open(),
         }
         if appearance {
             self.save_appearance();
@@ -1480,6 +1492,13 @@ impl ReaderApp {
         if let Some(reference) = self.picker.show(ctx, colours) {
             let now = ctx.input(|input| input.time);
             self.navigate(reference, now);
+        }
+
+        if self
+            .settings_window
+            .show(ctx, colours, &mut self.theme, &mut self.typography)
+        {
+            self.save_appearance();
         }
 
         self.paint_verse_menu(ctx, colours);
@@ -1701,6 +1720,8 @@ pub enum ShotView {
     StudySidebar,
     /// The parallel translations view, with one synthetic mark of each kind.
     Parallel,
+    /// The reading preferences window, open on the current appearance.
+    Settings,
 }
 
 impl ShotView {
@@ -1714,6 +1735,7 @@ impl ShotView {
             "shortcuts" | "overlay" => Some(Self::Shortcuts),
             "sidebar" | "study-sidebar" => Some(Self::StudySidebar),
             "parallel" => Some(Self::Parallel),
+            "settings" => Some(Self::Settings),
             _ => None,
         }
     }
@@ -2000,9 +2022,6 @@ fn translation_choices(library: &Library) -> Vec<(String, String)> {
 }
 
 /// Maps a saved settings row onto the reader's theme and typography.
-///
-/// `paragraph_mode` has no counterpart in the core settings row, so it keeps
-/// the current GUI default rather than being invented here.
 fn preferences(settings: &Settings) -> (Theme, Typography) {
     let theme = match settings.theme {
         StoredTheme::Light => Theme::Light,
@@ -2017,7 +2036,7 @@ fn preferences(settings: &Settings) -> (Theme, Typography) {
         verse_numbers: settings.show_verse_numbers,
         headings: settings.show_headings,
         red_letters: settings.words_of_christ_red,
-        ..Typography::default()
+        paragraph_mode: settings.paragraph_mode,
     };
     (theme, typography)
 }

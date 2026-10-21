@@ -328,7 +328,14 @@ fn a_settings_row_written_before_the_field_keeps_paragraph_mode_on() {
 
     let store = Store::open(db.path()).expect("the store reopens");
     let settings = store.settings().clone();
-    assert!(settings.paragraph_mode, "the missing field keeps the default");
-    assert_eq!(settings.theme, Theme::Dark, "the other fields are preserved");
+    assert!(
+        settings.paragraph_mode,
+        "the missing field keeps the default"
+    );
+    assert_eq!(
+        settings.theme,
+        Theme::Dark,
+        "the other fields are preserved"
+    );
     assert_eq!(settings.text_size, 21.0);
 }

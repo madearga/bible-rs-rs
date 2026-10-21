@@ -186,8 +186,7 @@ fn an_export_without_the_paragraph_mode_imports_with_the_default() {
         .set_settings(source.settings().clone())
         .expect("the settings are set");
     let json = source.export_json().expect("the export is written");
-    let mut document: serde_json::Value =
-        serde_json::from_str(&json).expect("the export is JSON");
+    let mut document: serde_json::Value = serde_json::from_str(&json).expect("the export is JSON");
     document["settings"]
         .as_object_mut()
         .expect("the settings are an object")
