@@ -7,6 +7,8 @@ A native macOS Bible reader. It opens a window, reads the whole Bible, searches
 it as you type, and keeps your highlights, notes, and bookmarks on your own
 machine. There is no account, no server, and no network call anywhere in it.
 
+**Download:** the latest build is on the [releases page](https://github.com/madearga/bible-rs-rs/releases/latest) — unzip and drag Bible.app to Applications. The build is unsigned, so the first launch asks for a right-click → Open.
+
 Seven public-domain English translations are compiled into the binary, so the
 app has scripture on a machine that has never installed anything.
 
