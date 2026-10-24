@@ -31,6 +31,7 @@ pub mod cli;
 pub mod history;
 #[cfg(target_os = "macos")]
 pub mod macos_menu;
+pub mod motion;
 pub mod palette;
 pub mod parallel;
 pub mod reader;

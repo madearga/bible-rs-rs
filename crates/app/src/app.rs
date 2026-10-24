@@ -26,6 +26,7 @@ use egui::{Align, FontId, Pos2, Rect, RichText, Stroke, pos2, vec2};
 use crate::Library;
 use crate::book_picker::BookPicker;
 use crate::history::History;
+use crate::motion::{self, Spring};
 use crate::palette::{Choice, Palette as JumpPalette};
 use crate::parallel::{Column, MAX_COLUMNS, ParallelView};
 use crate::reader::Reader;
@@ -76,6 +77,7 @@ pub struct ReaderApp {
     study: Store,
     sidebar_open: bool,
     sidebar_state: sidebar::SidebarState,
+    sidebar_motion: Spring,
     study_rows: Vec<Row>,
     chapter_activity: BTreeSet<(u8, u8)>,
     corpus: Option<(String, Corpus)>,
@@ -296,6 +298,7 @@ impl ReaderApp {
             study,
             sidebar_open,
             sidebar_state: sidebar::SidebarState::default(),
+            sidebar_motion: Spring::at_rest(if sidebar_open { 1.0 } else { 0.0 }),
             study_rows: Vec::new(),
             chapter_activity: BTreeSet::new(),
             corpus: None,
@@ -353,6 +356,8 @@ impl ReaderApp {
         let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is canonical");
         self.navigate(highlight, 0.0);
         self.sidebar_open = true;
+        // A photograph has no frames to wait for, so the demo opens settled.
+        self.sidebar_motion.snap_to(1.0);
         self.refresh_sidebar();
         self.sidebar_state.reveal(self.reference);
     }
@@ -397,6 +402,8 @@ impl ReaderApp {
             self.refresh_sidebar();
             self.sidebar_state.reveal(self.reference);
         }
+        self.sidebar_motion
+            .retarget(if self.sidebar_open { 1.0 } else { 0.0 });
         self.save_preferences();
     }
 
@@ -617,6 +624,12 @@ impl ReaderApp {
         self.sidebar_open
     }
 
+    /// How far the sidebar has slid open, from zero to one, which a test reads
+    /// to prove the slide moves and arrives.
+    pub fn sidebar_fraction(&self) -> f64 {
+        self.sidebar_motion.value()
+    }
+
     /// Whether the settings window is on screen.
     pub fn settings_window_is_open(&self) -> bool {
         self.settings_window.is_open()
@@ -648,7 +661,22 @@ impl ReaderApp {
         self.paint_toolbar(ui, palette);
 
         let mut study_jump = None;
-        if self.sidebar_open {
+        // The slide advances once per frame and asks for the next frame while
+        // it is still moving, which is what carries the panel across. A reader
+        // who asked the system to reduce motion gets the target at once.
+        let step = ui
+            .ctx()
+            .input(|input| input.stable_dt.max(input.predicted_dt)) as f64;
+        if motion::reduce_motion() {
+            self.sidebar_motion.snap_to(self.sidebar_motion.target());
+        } else {
+            self.sidebar_motion.advance(step);
+        }
+        if self.sidebar_motion.moving() {
+            ui.ctx().request_repaint();
+        }
+        let fraction = self.sidebar_motion.value() as f32;
+        if fraction > 0.0 {
             let Self {
                 sidebar_state,
                 study_rows,
@@ -658,7 +686,7 @@ impl ReaderApp {
             } = self;
             egui::Panel::left("study-sidebar")
                 .resizable(false)
-                .default_size(240.0)
+                .exact_size(sidebar::SIDEBAR_WIDTH * fraction)
                 .frame(
                     egui::Frame::NONE
                         .fill(palette.paper)
@@ -666,8 +694,17 @@ impl ReaderApp {
                         .stroke(Stroke::new(1.0, palette.rule)),
                 )
                 .show(ui, |ui| {
+                    // The content keeps its full width and slides in from the
+                    // window edge, so the column never re-wraps mid-slide.
+                    let area = ui.max_rect();
+                    let left = area.left() - (1.0 - fraction) * sidebar::SIDEBAR_WIDTH;
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(left, area.top()),
+                        egui::pos2(left + sidebar::SIDEBAR_WIDTH, area.bottom()),
+                    );
+                    let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     study_jump = sidebar::show(
-                        ui,
+                        &mut content,
                         sidebar_state,
                         study_rows,
                         chapter_activity,

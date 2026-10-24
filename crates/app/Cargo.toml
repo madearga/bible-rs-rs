@@ -32,6 +32,10 @@ egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSAccessibility",
+    "NSWorkspace",
+] }
 
 [lints.rust]
 unsafe_code = "forbid"

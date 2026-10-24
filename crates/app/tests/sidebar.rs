@@ -36,11 +36,15 @@ fn harness(name: &str) -> egui_kittest::Harness<'static, ReaderApp> {
 
 /// Builds a harness with a given window size, for tests that need the whole
 /// sidebar column on screen at once.
+///
+/// The step budget is raised because one run carries the sidebar spring
+/// through its whole slide, which takes more frames than a static window.
 fn harness_sized(name: &str, size: egui::Vec2) -> egui_kittest::Harness<'static, ReaderApp> {
     let data = scratch(name);
     egui_kittest::Harness::builder()
         .with_size(size)
         .with_pixels_per_point(1.0)
+        .with_max_steps(64)
         .wgpu()
         .build_eframe(move |cc| ReaderApp::open_at(cc, Theme::Light, default_reference(), &data))
 }
@@ -70,6 +74,34 @@ fn the_toolbar_button_opens_and_closes_the_sidebar() {
     assert!(
         !harness.state().sidebar_is_open(),
         "the Sidebar button did not close the sidebar"
+    );
+}
+
+#[test]
+fn the_sidebar_slides_instead_of_appearing() {
+    let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
+    let mut harness = harness("slide");
+    harness.run();
+    assert_eq!(harness.state().sidebar_fraction(), 0.0);
+    harness.get_by_label("Sidebar").click();
+    // The click's own frame may land before the toggle, so the value is read
+    // a couple of steps into the slide.
+    harness.step();
+    harness.step();
+    if !bible_app::motion::reduce_motion() {
+        let mid = harness.state().sidebar_fraction();
+        assert!(
+            (0.0..1.0).contains(&mid),
+            "the sidebar jumped instead of sliding: {mid}"
+        );
+    }
+    for _ in 0..30 {
+        harness.step();
+    }
+    assert!(
+        harness.state().sidebar_fraction() > 0.999,
+        "the slide did not arrive: {}",
+        harness.state().sidebar_fraction()
     );
 }
 
@@ -217,6 +249,7 @@ fn a_reopened_window_restores_the_sidebar_state() {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(900.0, 700.0))
             .with_pixels_per_point(1.0)
+            .with_max_steps(64)
             .wgpu()
             .build_eframe(move |cc| {
                 ReaderApp::open_in(cc, Theme::Light, default_reference(), &data)
@@ -232,6 +265,7 @@ fn a_reopened_window_restores_the_sidebar_state() {
     let mut reopened = egui_kittest::Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
         .with_pixels_per_point(1.0)
+        .with_max_steps(64)
         .wgpu()
         .build_eframe(move |cc| ReaderApp::open_in(cc, Theme::Light, default_reference(), &data));
     reopened.run();

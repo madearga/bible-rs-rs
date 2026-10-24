@@ -442,6 +442,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "muda",
+ "objc2-app-kit 0.3.2",
  "serde",
  "serde_json",
 ]

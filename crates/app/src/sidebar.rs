@@ -21,6 +21,9 @@ use egui::{Color32, FontId, RichText, vec2};
 
 use crate::theme::{self, Palette};
 
+/// The width the sidebar paints at, whatever fraction of it is revealed.
+pub const SIDEBAR_WIDTH: f32 = 240.0;
+
 /// The chapters that carry at least one study mark, as canonical
 /// `(book, chapter)` pairs.
 ///
