@@ -167,6 +167,12 @@ pub struct Settings {
     /// The default is on, which is what the reader already did, so a settings
     /// row written before this field existed keeps its old behavior.
     pub paragraph_mode: bool,
+    /// Whether the sidebar was open when the reader last stopped.
+    ///
+    /// The default is closed, which is what a settings row written before this
+    /// field existed reads as, so an older row opens with the sidebar shut
+    /// until the reader opens it again.
+    pub sidebar_open: bool,
 }
 
 impl Default for Settings {
@@ -186,6 +192,7 @@ impl Default for Settings {
             show_headings: true,
             words_of_christ_red: true,
             paragraph_mode: true,
+            sidebar_open: false,
         }
     }
 }

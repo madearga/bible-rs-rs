@@ -267,14 +267,15 @@ impl ReaderApp {
         };
         // The saved row is the reader's appearance. On a fresh store there is
         // none, so the current GUI typography and the caller's theme remain.
-        let (theme, typography) = if restore_appearance && had_store {
-            preferences(study.settings())
+        let (theme, typography, sidebar_open) = if restore_appearance && had_store {
+            let (theme, typography) = preferences(study.settings());
+            (theme, typography, study.settings().sidebar_open)
         } else {
-            (theme, Typography::default())
+            (theme, Typography::default(), false)
         };
         theme::install(&cc.egui_ctx, theme);
         let translation_choices = translation_choices(&library);
-        Self {
+        let mut app = Self {
             library,
             translation,
             reference: start.chapter_only(),
@@ -293,7 +294,7 @@ impl ReaderApp {
             menu: VerseMenu::new(),
             settings_window: SettingsWindow::new(),
             study,
-            sidebar_open: false,
+            sidebar_open,
             sidebar_state: sidebar::SidebarState::default(),
             study_rows: Vec::new(),
             chapter_activity: BTreeSet::new(),
@@ -303,7 +304,12 @@ impl ReaderApp {
             saved_position: start.chapter_only(),
             parallel: None,
             translation_choices,
+        };
+        if sidebar_open {
+            app.refresh_sidebar();
+            app.sidebar_state.reveal(app.reference);
         }
+        app
     }
 
     /// Puts the window into one of the states the render harness photographs.
@@ -381,7 +387,8 @@ impl ReaderApp {
     ///
     /// Opening rebuilds the row and activity caches from one store snapshot and
     /// reveals the chapter the reader is in. While the sidebar is open its rows
-    /// are rebuilt after a successful study edit, not on every frame.
+    /// are rebuilt after a successful study edit, not on every frame. Either
+    /// way the state is saved, so the next window opens as this one looked.
     pub fn toggle_sidebar(&mut self) {
         if self.sidebar_open {
             self.sidebar_open = false;
@@ -390,6 +397,7 @@ impl ReaderApp {
             self.refresh_sidebar();
             self.sidebar_state.reveal(self.reference);
         }
+        self.save_preferences();
     }
 
     /// Rebuilds the sidebar row and chapter activity caches from the store's
@@ -715,7 +723,7 @@ impl ReaderApp {
                         let label = format!("Theme: {}", self.theme.name());
                         if ui.button(label).clicked() {
                             self.theme = self.theme.next();
-                            self.save_appearance();
+                            self.save_preferences();
                         }
                         ui.label(
                             RichText::new(self.translation.meta().abbreviation.clone())
@@ -1191,12 +1199,13 @@ impl ReaderApp {
         }
     }
 
-    /// Writes the theme and typography into the study settings.
+    /// Writes the appearance preferences and the sidebar state into the study
+    /// settings.
     ///
     /// The position is left alone, so changing the appearance never moves the
     /// reader. The store coalesces these writes on its 1.5 second throttle, and
     /// [`ReaderApp::flush_settings`] writes a pending change on the way out.
-    fn save_appearance(&mut self) {
+    fn save_preferences(&mut self) {
         let mut settings = self.study.settings().clone();
         settings.theme = match self.theme {
             Theme::Light => StoredTheme::Light,
@@ -1211,6 +1220,7 @@ impl ReaderApp {
         settings.show_headings = self.typography.headings;
         settings.words_of_christ_red = self.typography.red_letters;
         settings.paragraph_mode = self.typography.paragraph_mode;
+        settings.sidebar_open = self.sidebar_open;
         if let Err(error) = self.study.set_settings(settings) {
             self.status = format!("cannot save the reader preferences: {error:#}");
         }
@@ -1380,6 +1390,7 @@ impl ReaderApp {
             Action::CopyWithReference => self.apply_menu(MenuAction::CopyWithReference, ctx),
             Action::Compare => self.compare_selected(),
             Action::ToggleParallel => self.toggle_parallel(),
+            Action::ToggleSidebar => self.toggle_sidebar(),
             Action::ExportMarkdown => {
                 let path = crate::data_dir().join("study.md");
                 match std::fs::write(&path, self.study.export_markdown()) {
@@ -1415,7 +1426,7 @@ impl ReaderApp {
             Action::Preferences => self.settings_window.open(),
         }
         if appearance {
-            self.save_appearance();
+            self.save_preferences();
         }
     }
 
@@ -1529,7 +1540,7 @@ impl ReaderApp {
             .settings_window
             .show(ctx, colours, &mut self.theme, &mut self.typography)
         {
-            self.save_appearance();
+            self.save_preferences();
         }
 
         self.paint_verse_menu(ctx, colours);

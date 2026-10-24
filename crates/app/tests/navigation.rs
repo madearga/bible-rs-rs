@@ -73,16 +73,22 @@ fn command_f_opens_the_search_panel() {
 }
 
 #[test]
-fn command_b_opens_the_book_picker() {
+fn command_b_toggles_the_sidebar() {
     let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
     let mut harness = harness();
     harness.run();
-    assert!(!harness.state().picker_is_open());
+    assert!(!harness.state().sidebar_is_open());
     harness.key_press_modifiers(command(), egui::Key::B);
     harness.run();
     assert!(
-        harness.state().picker_is_open(),
-        "command-B did not open the picker"
+        harness.state().sidebar_is_open(),
+        "command-B did not open the sidebar"
+    );
+    harness.key_press_modifiers(command(), egui::Key::B);
+    harness.run();
+    assert!(
+        !harness.state().sidebar_is_open(),
+        "command-B did not close the sidebar"
     );
 }
 

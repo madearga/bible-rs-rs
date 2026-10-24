@@ -207,3 +207,40 @@ fn the_sidebar_shot_is_written_in_a_scratch_folder() {
     let bytes = std::fs::read(&path).expect("the PNG was written");
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
+
+#[test]
+fn a_reopened_window_restores_the_sidebar_state() {
+    let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
+    let folder = scratch("restore");
+    {
+        let data = folder.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .with_pixels_per_point(1.0)
+            .wgpu()
+            .build_eframe(move |cc| {
+                ReaderApp::open_in(cc, Theme::Light, default_reference(), &data)
+            });
+        harness.run();
+        harness.get_by_label("Sidebar").click();
+        harness.run();
+        assert!(harness.state().sidebar_is_open());
+        // Dropping the harness drops the app, which flushes the settings the
+        // throttle is still holding.
+    }
+    let data = folder;
+    let mut reopened = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_eframe(move |cc| ReaderApp::open_in(cc, Theme::Light, default_reference(), &data));
+    reopened.run();
+    assert!(
+        reopened.state().sidebar_is_open(),
+        "the reopened window did not restore the open sidebar"
+    );
+    assert!(
+        reopened.query_by_label("3").is_some(),
+        "the reopened sidebar did not reveal the chapter the reader is in"
+    );
+}

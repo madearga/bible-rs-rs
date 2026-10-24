@@ -201,7 +201,8 @@ fn study_export_literal() -> serde_json::Value {
             "show_verse_numbers": true,
             "show_headings": true,
             "words_of_christ_red": true,
-            "paragraph_mode": true
+            "paragraph_mode": true,
+            "sidebar_open": false
         },
         "highlights": [
             {"reference": {"book": 42, "chapter": 3, "verse": 16}, "colour": "blue"}

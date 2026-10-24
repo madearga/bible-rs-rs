@@ -175,6 +175,7 @@ pub fn menu_spec() -> Vec<Menu> {
         Menu {
             title: "View".to_owned(),
             items: vec![
+                Item::command(Action::ToggleSidebar, "Toggle Sidebar"),
                 Item::command(Action::CycleTheme, "Cycle Theme"),
                 Item::command(Action::ToggleRedLetter, "Words of Christ in Red"),
                 Item::command(Action::TextLarger, "Larger Text"),
@@ -215,6 +216,7 @@ pub fn menu_id(action: Action) -> String {
         Action::JumpPalette => "jump-palette".to_owned(),
         Action::Search => "search".to_owned(),
         Action::BookPicker => "book-picker".to_owned(),
+        Action::ToggleSidebar => "toggle-sidebar".to_owned(),
         Action::Translation(index) => format!("translation-{index}"),
         Action::Back => "back".to_owned(),
         Action::Forward => "forward".to_owned(),

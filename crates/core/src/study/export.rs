@@ -109,6 +109,12 @@ struct SettingsEntry {
     /// keeps the reader's earlier paragraph behavior rather than failing.
     #[serde(default = "default_paragraph_mode")]
     paragraph_mode: bool,
+    /// Whether the sidebar was open.
+    ///
+    /// An export or settings row written before this field existed omits it,
+    /// so the default keeps the sidebar closed rather than failing.
+    #[serde(default)]
+    sidebar_open: bool,
 }
 
 /// The paragraph mode an export or settings row written before the field existed
@@ -160,6 +166,7 @@ impl SettingsEntry {
             show_headings: settings.show_headings,
             words_of_christ_red: settings.words_of_christ_red,
             paragraph_mode: settings.paragraph_mode,
+            sidebar_open: settings.sidebar_open,
         }
     }
 
@@ -192,6 +199,7 @@ impl SettingsEntry {
             show_headings: self.show_headings,
             words_of_christ_red: self.words_of_christ_red,
             paragraph_mode: self.paragraph_mode,
+            sidebar_open: self.sidebar_open,
         })
     }
 }

@@ -78,6 +78,8 @@ pub enum Action {
     Search,
     /// Open the book and chapter picker.
     BookPicker,
+    /// Show or hide the sidebar.
+    ToggleSidebar,
     /// Switch to the translation at this zero-based position in the list.
     Translation(u8),
     /// Go back in the history.
@@ -139,6 +141,7 @@ impl Action {
             Self::JumpPalette => "Jump to a reference",
             Self::Search => "Search",
             Self::BookPicker => "Book and chapter picker",
+            Self::ToggleSidebar => "Toggle sidebar",
             Self::Translation(_) => "Switch translation",
             Self::Back => "Back",
             Self::Forward => "Forward",
@@ -199,7 +202,7 @@ pub static SHORTCUTS: &[Shortcut] = &[
     shortcut(Combo::command(Key::Char('f')), Action::Search, "command-F"),
     shortcut(
         Combo::command(Key::Char('b')),
-        Action::BookPicker,
+        Action::ToggleSidebar,
         "command-B",
     ),
     shortcut(

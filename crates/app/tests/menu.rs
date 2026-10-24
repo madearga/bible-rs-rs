@@ -96,6 +96,7 @@ fn the_menu_bar_has_the_expected_items() {
         (
             "View",
             vec![
+                "Toggle Sidebar",
                 "Cycle Theme",
                 "Words of Christ in Red",
                 "Larger Text",
@@ -139,12 +140,14 @@ fn every_menu_command_is_performed_by_the_keyboard_handler() {
     let table: Vec<Action> = SHORTCUTS.iter().map(|shortcut| shortcut.action).collect();
     for (menu, action, label, _) in command_items() {
         if action == Action::Preferences
+            || action == Action::BookPicker
             || action == Action::ToggleVerseNumbers
             || action == Action::ToggleHeadings
             || action == Action::ShowShortcuts
         {
             // These have no key combination, so the keyboard handler cannot
-            // reach them and the menu bar is their only entry.
+            // reach them and the menu bar is their only menu entry. The book
+            // and chapter picker also opens from the toolbar button.
             assert!(
                 combo_for(action).is_none(),
                 "{label} gained a shortcut without a menu accelerator"
