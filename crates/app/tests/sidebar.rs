@@ -31,9 +31,15 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Builds a harness around the real app with its own scratch data folder.
 fn harness(name: &str) -> egui_kittest::Harness<'static, ReaderApp> {
+    harness_sized(name, egui::vec2(900.0, 700.0))
+}
+
+/// Builds a harness with a given window size, for tests that need the whole
+/// sidebar column on screen at once.
+fn harness_sized(name: &str, size: egui::Vec2) -> egui_kittest::Harness<'static, ReaderApp> {
     let data = scratch(name);
     egui_kittest::Harness::builder()
-        .with_size(egui::vec2(900.0, 700.0))
+        .with_size(size)
         .with_pixels_per_point(1.0)
         .wgpu()
         .build_eframe(move |cc| ReaderApp::open_at(cc, Theme::Light, default_reference(), &data))
@@ -50,21 +56,52 @@ fn the_toolbar_button_opens_and_closes_the_sidebar() {
     let mut harness = harness("open-close");
     harness.run();
     assert!(
-        !harness.state().study_sidebar_is_open(),
+        !harness.state().sidebar_is_open(),
         "the sidebar starts closed"
     );
-    harness.get_by_label("Study").click();
+    harness.get_by_label("Sidebar").click();
     harness.run();
     assert!(
-        harness.state().study_sidebar_is_open(),
-        "the Study button did not open the sidebar"
+        harness.state().sidebar_is_open(),
+        "the Sidebar button did not open the sidebar"
     );
-    harness.get_by_label("Study").click();
+    harness.get_by_label("Sidebar").click();
     harness.run();
     assert!(
-        !harness.state().study_sidebar_is_open(),
-        "the Study button did not close the sidebar"
+        !harness.state().sidebar_is_open(),
+        "the Sidebar button did not close the sidebar"
     );
+}
+
+#[test]
+fn opening_the_sidebar_reveals_the_books_around_the_reader() {
+    let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
+    let mut harness = harness("reveal");
+    harness.run();
+    harness.get_by_label("Sidebar").click();
+    harness.run();
+    assert!(
+        harness.query_by_label_contains("Genesis").is_none(),
+        "the Old Testament should stay folded when the reader is in John"
+    );
+    assert!(
+        harness.query_by_label("3").is_some(),
+        "the current chapter's chip is not on screen"
+    );
+}
+
+#[test]
+fn a_chapter_chip_jumps_to_its_chapter_and_records_history() {
+    let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
+    let mut harness = harness("chip");
+    harness.run();
+    harness.get_by_label("Sidebar").click();
+    harness.run();
+    harness.get_by_label("5").click();
+    harness.run();
+    let expected = Reference::new(42, 5, None).expect("John 5 is canonical");
+    assert_eq!(harness.state().reference(), expected);
+    assert_eq!(harness.state().history_current(), Some(expected));
 }
 
 #[test]
@@ -88,7 +125,9 @@ fn the_seeded_sidebar_lists_all_three_kinds() {
 #[test]
 fn activating_a_row_jumps_to_its_reference_with_history() {
     let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
-    let mut harness = harness("activate");
+    // The study rows sit below the Books section, so the window is tall enough
+    // to show the whole column and the row is clickable.
+    let mut harness = harness_sized("activate", egui::vec2(900.0, 1400.0));
     harness.run();
     harness.state_mut().set_view(ShotView::StudySidebar);
     harness.run();
@@ -118,9 +157,9 @@ fn activating_a_row_jumps_to_its_reference_with_history() {
 #[test]
 fn an_empty_store_shows_the_empty_state() {
     let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
-    let mut harness = harness("empty");
+    let mut harness = harness_sized("empty", egui::vec2(900.0, 1400.0));
     harness.run();
-    harness.get_by_label("Study").click();
+    harness.get_by_label("Sidebar").click();
     harness.run();
     assert!(harness.state().study_rows().is_empty());
     assert!(

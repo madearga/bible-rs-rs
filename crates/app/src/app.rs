@@ -8,6 +8,7 @@
 //! app through the toolkit's test harness and writes a PNG, which is how every
 //! change to this file is verified on a machine with no display.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,8 +74,10 @@ pub struct ReaderApp {
     menu: VerseMenu,
     settings_window: SettingsWindow,
     study: Store,
-    study_sidebar_open: bool,
+    sidebar_open: bool,
+    sidebar_state: sidebar::SidebarState,
     study_rows: Vec<Row>,
+    chapter_activity: BTreeSet<(u8, u8)>,
     corpus: Option<(String, Corpus)>,
     flash: Option<(Reference, f64)>,
     overlay: bool,
@@ -290,8 +293,10 @@ impl ReaderApp {
             menu: VerseMenu::new(),
             settings_window: SettingsWindow::new(),
             study,
-            study_sidebar_open: false,
+            sidebar_open: false,
+            sidebar_state: sidebar::SidebarState::default(),
             study_rows: Vec::new(),
+            chapter_activity: BTreeSet::new(),
             corpus: None,
             flash: None,
             overlay: false,
@@ -331,7 +336,7 @@ impl ReaderApp {
         }
     }
 
-    /// Opens the study sidebar with a synthetic mark of each kind.
+    /// Opens the sidebar with a synthetic mark of each kind.
     ///
     /// This is the state the render harness photographs. It writes only to the
     /// store the harness opened in a scratch folder, never to a reader's data.
@@ -341,8 +346,9 @@ impl ReaderApp {
         // the chapter its synthetic marks belong to.
         let highlight = Reference::new(42, 3, Some(16)).expect("John 3:16 is canonical");
         self.navigate(highlight, 0.0);
-        self.study_sidebar_open = true;
-        self.refresh_study_rows();
+        self.sidebar_open = true;
+        self.refresh_sidebar();
+        self.sidebar_state.reveal(self.reference);
     }
 
     /// Writes one highlight, one note, and one bookmark into the store the
@@ -371,23 +377,27 @@ impl ReaderApp {
         }
     }
 
-    /// Opens the study sidebar, or closes it when it is already open.
+    /// Opens the sidebar, or closes it when it is already open.
     ///
-    /// Opening rebuilds the row cache from one store snapshot. While the
-    /// sidebar is open its rows are rebuilt after a successful study edit, not
-    /// on every frame.
-    pub fn toggle_study_sidebar(&mut self) {
-        if self.study_sidebar_open {
-            self.study_sidebar_open = false;
+    /// Opening rebuilds the row and activity caches from one store snapshot and
+    /// reveals the chapter the reader is in. While the sidebar is open its rows
+    /// are rebuilt after a successful study edit, not on every frame.
+    pub fn toggle_sidebar(&mut self) {
+        if self.sidebar_open {
+            self.sidebar_open = false;
         } else {
-            self.study_sidebar_open = true;
-            self.refresh_study_rows();
+            self.sidebar_open = true;
+            self.refresh_sidebar();
+            self.sidebar_state.reveal(self.reference);
         }
     }
 
-    /// Rebuilds the sidebar row cache from the store's mirror.
-    fn refresh_study_rows(&mut self) {
-        self.study_rows = sidebar::rows_from_snapshot(&self.study.snapshot());
+    /// Rebuilds the sidebar row and chapter activity caches from the store's
+    /// mirror.
+    fn refresh_sidebar(&mut self) {
+        let data = self.study.snapshot();
+        self.study_rows = sidebar::rows_from_snapshot(&data);
+        self.chapter_activity = sidebar::chapter_activity(&data);
     }
 
     /// Opens the parallel view with one synthetic mark of each kind on screen.
@@ -594,9 +604,9 @@ impl ReaderApp {
         self.menu.is_open()
     }
 
-    /// Whether the study sidebar is on screen.
-    pub fn study_sidebar_is_open(&self) -> bool {
-        self.study_sidebar_open
+    /// Whether the sidebar is on screen.
+    pub fn sidebar_is_open(&self) -> bool {
+        self.sidebar_open
     }
 
     /// Whether the settings window is on screen.
@@ -630,9 +640,15 @@ impl ReaderApp {
         self.paint_toolbar(ui, palette);
 
         let mut study_jump = None;
-        if self.study_sidebar_open {
-            let rows = &self.study_rows;
-            egui::Panel::right("study-sidebar")
+        if self.sidebar_open {
+            let Self {
+                sidebar_state,
+                study_rows,
+                chapter_activity,
+                reference,
+                ..
+            } = self;
+            egui::Panel::left("study-sidebar")
                 .resizable(false)
                 .default_size(240.0)
                 .frame(
@@ -642,7 +658,14 @@ impl ReaderApp {
                         .stroke(Stroke::new(1.0, palette.rule)),
                 )
                 .show(ui, |ui| {
-                    study_jump = sidebar::show(ui, rows, palette);
+                    study_jump = sidebar::show(
+                        ui,
+                        sidebar_state,
+                        study_rows,
+                        chapter_activity,
+                        *reference,
+                        palette,
+                    );
                 });
         }
         if let Some(reference) = study_jump {
@@ -708,8 +731,8 @@ impl ReaderApp {
                         if ui.button("Jump").clicked() {
                             self.palette.open();
                         }
-                        if ui.button("Study").clicked() {
-                            self.toggle_study_sidebar();
+                        if ui.button("Sidebar").clicked() {
+                            self.toggle_sidebar();
                         }
                         if ui.button("Parallel").clicked() {
                             self.toggle_parallel();
@@ -1124,7 +1147,10 @@ impl ReaderApp {
     ///
     /// The verse is selected as well, so the study actions that follow a jump
     /// have a target, and the chapter flashes so the reader can see the landing.
+    /// While the sidebar is open a move into another book carries the expanded
+    /// chapter grid along, so the place the reader just landed in stays visible.
     fn navigate(&mut self, reference: Reference, now: f64) {
+        let changed_book = self.reference.book != reference.book;
         self.selection.select(reference);
         self.reference = reference.chapter_only();
         self.reader.set_position(reference.chapter_only());
@@ -1134,6 +1160,9 @@ impl ReaderApp {
         self.history.visit(reference.chapter_only());
         self.flash = Some((reference, now + 0.9));
         self.remember(reference);
+        if self.sidebar_open && changed_book {
+            self.sidebar_state.expanded_book = Some(reference.book);
+        }
     }
 
     /// Shows the place the history moved to without recording a new visit.
@@ -1229,6 +1258,8 @@ impl ReaderApp {
             || self.search.is_open()
             || self.picker.is_open()
             || self.settings_window.is_open()
+            || self.menu.is_open()
+            || sidebar::filter_has_focus(ctx)
         {
             return;
         }
@@ -1400,8 +1431,8 @@ impl ReaderApp {
         match self.menu.apply(action, &mut self.study, &self.translation) {
             Ok(outcome) => {
                 self.status = outcome.message;
-                if self.study_sidebar_open {
-                    self.refresh_study_rows();
+                if self.sidebar_open {
+                    self.refresh_sidebar();
                 }
                 if let Some(text) = outcome.clipboard {
                     ctx.copy_text(text);

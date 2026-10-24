@@ -1,20 +1,104 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 madearga
 
-//! The study sidebar and the margin marks that point into it.
+//! The sidebar: a Books section that walks the canonical grid, and the study
+//! list it shares the column with.
 //!
-//! The sidebar is a read-only view of the core study store. [`rows_from_snapshot`]
-//! turns one store snapshot into grouped rows, [`show`] paints those rows and
-//! returns the reference the reader picked, and [`margin_markers`] answers the
-//! two cheap questions the reading surface asks for every visible verse. Nothing
-//! here writes to the store: a row is a place to jump to, not an edit.
+//! Both sections are read-only views of state the rest of the app owns. The
+//! Books section reads the book table and a set of chapters that carry study
+//! marks; the study list reads one store snapshot turned into rows by
+//! [`rows_from_snapshot`]. [`show`] paints both and returns the place the
+//! reader activated, and [`margin_markers`] answers the two cheap questions the
+//! reading surface asks for every visible verse. Nothing here writes to the
+//! store: a row is a place to jump to, not an edit.
 
-use bible_core::Reference;
+use std::collections::BTreeSet;
+
 use bible_core::study::{Store, StudyData};
+use bible_core::{Book, Reference, Testament, books};
 use eframe::egui;
-use egui::{FontId, RichText};
+use egui::{Color32, FontId, RichText, vec2};
 
 use crate::theme::{self, Palette};
+
+/// The chapters that carry at least one study mark, as canonical
+/// `(book, chapter)` pairs.
+///
+/// A chapter with any kind of mark is in the set, whatever the mark is, so the
+/// chapter grid can dot a chapter without knowing which marks it holds.
+pub fn chapter_activity(data: &StudyData) -> BTreeSet<(u8, u8)> {
+    let mut chapters = BTreeSet::new();
+    for (reference, _) in &data.highlights {
+        chapters.insert((reference.book, reference.chapter));
+    }
+    for (reference, _) in &data.notes {
+        chapters.insert((reference.book, reference.chapter));
+    }
+    for (reference, _) in &data.bookmarks {
+        chapters.insert((reference.book, reference.chapter));
+    }
+    chapters
+}
+
+/// The navigation and filter state the sidebar keeps between frames.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SidebarState {
+    /// The book filter, matched case-insensitively against names and
+    /// abbreviations. Empty means every book shows.
+    pub filter: String,
+    /// Whether the Old Testament section is expanded.
+    pub old_open: bool,
+    /// Whether the New Testament section is expanded.
+    pub new_open: bool,
+    /// The one book whose chapter grid is expanded.
+    pub expanded_book: Option<u8>,
+}
+
+impl SidebarState {
+    /// Reveals a place: clears the filter, expands its book, and opens only
+    /// the testament that holds it.
+    ///
+    /// This is what opening the sidebar does, so the grid is already on the
+    /// chapter the reader is in instead of folded away at Genesis.
+    pub fn reveal(&mut self, reference: Reference) {
+        self.filter.clear();
+        self.expanded_book = Some(reference.book);
+        match books::book(reference.book).map(|book| book.testament) {
+            Some(Testament::Old) => {
+                self.old_open = true;
+                self.new_open = false;
+            }
+            Some(Testament::New) => {
+                self.new_open = true;
+                self.old_open = false;
+            }
+            None => {}
+        }
+    }
+
+    /// Whether a book's name or abbreviation contains the filter.
+    fn book_visible(&self, book: &Book) -> bool {
+        let needle = self.filter.trim().to_lowercase();
+        needle.is_empty()
+            || book.name.to_lowercase().contains(&needle)
+            || book.abbreviation.to_lowercase().contains(&needle)
+    }
+}
+
+/// The widget id of the book filter, which the app checks before it runs the
+/// plain-key shortcuts.
+///
+/// Letters typed into the filter must not also highlight verses or open the
+/// note editor, and the app can only know to stay out of the way by asking
+/// whether this exact id holds the keyboard focus.
+pub fn filter_id() -> egui::Id {
+    egui::Id::new("sidebar-book-filter")
+}
+
+/// Whether the book filter holds the keyboard focus.
+pub fn filter_has_focus(ctx: &egui::Context) -> bool {
+    ctx.memory(|memory| memory.focused() == Some(filter_id()))
+}
 
 /// The three kinds of study mark, in the order the sidebar groups them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,62 +222,246 @@ pub fn margin_markers(store: &Store, reference: Reference) -> MarginMarkers {
     }
 }
 
-/// Paints the sidebar rows and returns the reference the reader activated.
+/// Paints the sidebar and returns the place the reader activated.
 ///
-/// The function only reads `rows`; the caller decides what a jump means and
-/// records it in its own history.
-pub fn show(ui: &mut egui::Ui, rows: &[Row], palette: Palette) -> Option<Reference> {
+/// Both the chapter grid and the study rows return references; the caller
+/// decides what a jump means and records it in its own history.
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut SidebarState,
+    rows: &[Row],
+    activity: &BTreeSet<(u8, u8)>,
+    current: Reference,
+    palette: Palette,
+) -> Option<Reference> {
     let mut chosen = None;
     ui.vertical(|ui| {
-        ui.label(
-            RichText::new("Study marks")
-                .font(FontId::new(14.0, theme::sans()))
-                .color(palette.ink),
+        ui.add(
+            egui::TextEdit::singleline(&mut state.filter)
+                .id_salt(filter_id())
+                .hint_text(RichText::new("Filter books").font(FontId::new(12.0, theme::sans())))
+                .desired_width(ui.available_width()),
         );
-        ui.separator();
-        if rows.is_empty() {
-            ui.label(
-                RichText::new("No study marks yet")
-                    .font(FontId::new(12.0, theme::sans()))
-                    .color(palette.muted),
-            );
-            return;
-        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for kind in RowKind::ALL {
-                    let group: Vec<&Row> = rows.iter().filter(|row| row.kind == kind).collect();
-                    if group.is_empty() {
-                        continue;
-                    }
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(kind.name())
-                            .font(FontId::new(11.0, theme::sans()))
-                            .color(palette.muted),
-                    );
-                    for row in group {
-                        let title = row.title();
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 22.0],
-                                egui::Button::new(
-                                    RichText::new(title)
-                                        .font(FontId::new(12.0, theme::sans()))
-                                        .color(palette.ink),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            chosen = Some(row.reference);
-                        }
-                    }
-                }
+                paint_books(ui, state, activity, current, palette, &mut chosen);
+                ui.add_space(4.0);
+                paint_study_marks(ui, rows, palette, &mut chosen);
             });
     });
     chosen
+}
+
+/// Paints the Books section: the two testament sections, their book rows, and
+/// the one expanded chapter grid.
+fn paint_books(
+    ui: &mut egui::Ui,
+    state: &mut SidebarState,
+    activity: &BTreeSet<(u8, u8)>,
+    current: Reference,
+    palette: Palette,
+    chosen: &mut Option<Reference>,
+) {
+    ui.label(
+        RichText::new("Books")
+            .font(FontId::new(14.0, theme::sans()))
+            .color(palette.ink),
+    );
+    let filtering = !state.filter.trim().is_empty();
+    let mut shown = 0;
+    for testament in [Testament::Old, Testament::New] {
+        let list: Vec<&Book> = books::books()
+            .iter()
+            .filter(|book| book.testament == testament && state.book_visible(book))
+            .collect();
+        if list.is_empty() {
+            continue;
+        }
+        shown += list.len();
+        let open = match testament {
+            Testament::Old => state.old_open,
+            Testament::New => state.new_open,
+        };
+        let label = match testament {
+            Testament::Old => "Old Testament",
+            Testament::New => "New Testament",
+        };
+        // The disclosure marker is ASCII because the bundled interface face
+        // has no triangle glyphs, which render as tofu.
+        let marker = if open || filtering { "- " } else { "+ " };
+        if ui
+            .add_sized(
+                [ui.available_width(), 22.0],
+                egui::Button::new(
+                    RichText::new(format!("{marker}{label} · {}", list.len()))
+                        .font(FontId::new(12.0, theme::sans()))
+                        .color(palette.muted),
+                )
+                .frame(false),
+            )
+            .clicked()
+        {
+            match testament {
+                Testament::Old => state.old_open = !state.old_open,
+                Testament::New => state.new_open = !state.new_open,
+            }
+        }
+        if open || filtering {
+            for book in list {
+                paint_book(ui, state, book, activity, current, palette, chosen);
+            }
+        }
+    }
+    if shown == 0 {
+        ui.label(
+            RichText::new("No book matches the filter")
+                .font(FontId::new(12.0, theme::sans()))
+                .color(palette.muted),
+        );
+    }
+}
+
+/// Paints one book row and, when the row is the expanded one, its chapter grid.
+fn paint_book(
+    ui: &mut egui::Ui,
+    state: &mut SidebarState,
+    book: &Book,
+    activity: &BTreeSet<(u8, u8)>,
+    current: Reference,
+    palette: Palette,
+    chosen: &mut Option<Reference>,
+) {
+    let expanded = state.expanded_book == Some(book.index);
+    let here = current.book == book.index;
+    let name = if expanded {
+        format!("- {}", book.name)
+    } else {
+        book.name.to_owned()
+    };
+    if ui
+        .add_sized(
+            [ui.available_width(), 22.0],
+            egui::Button::new(
+                RichText::new(name)
+                    .font(FontId::new(12.0, theme::sans()))
+                    .color(if here { palette.accent } else { palette.ink }),
+            )
+            .frame(false),
+        )
+        .clicked()
+    {
+        state.expanded_book = if expanded { None } else { Some(book.index) };
+    }
+    if expanded {
+        chapter_grid(ui, book, current, activity, palette, chosen);
+    }
+}
+
+/// Paints one book's chapters as a grid of round chips, seven per row.
+///
+/// The chapter the reader is in is filled with the accent, and a chapter that
+/// carries any study mark gets a dot beneath its chip.
+fn chapter_grid(
+    ui: &mut egui::Ui,
+    book: &Book,
+    current: Reference,
+    activity: &BTreeSet<(u8, u8)>,
+    palette: Palette,
+    chosen: &mut Option<Reference>,
+) {
+    const PER_ROW: u8 = 7;
+    const CHIP: f32 = 24.0;
+    const GAP: f32 = 4.0;
+    let mut first = 1u8;
+    while first <= book.chapter_count {
+        let last = first.saturating_add(PER_ROW - 1).min(book.chapter_count);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            for chapter in first..=last {
+                let here = current.book == book.index && current.chapter == chapter;
+                let marked = activity.contains(&(book.index, chapter));
+                let text = RichText::new(chapter.to_string())
+                    .font(FontId::new(10.0, theme::sans()))
+                    .color(if here { palette.paper } else { palette.ink });
+                let response = ui.add(
+                    egui::Button::new(text)
+                        .min_size(vec2(CHIP, CHIP))
+                        .fill(if here {
+                            palette.accent
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .corner_radius(CHIP / 2.0),
+                );
+                if marked {
+                    ui.painter().circle_filled(
+                        egui::pos2(response.rect.center().x, response.rect.bottom() + 3.0),
+                        1.5,
+                        palette.accent,
+                    );
+                }
+                if response.clicked()
+                    && let Some(reference) = Reference::new(book.index, chapter, None).ok()
+                {
+                    *chosen = Some(reference);
+                }
+            }
+        });
+        first = last.saturating_add(1);
+    }
+}
+
+/// Paints the study list: the grouped rows of marks the store holds.
+fn paint_study_marks(
+    ui: &mut egui::Ui,
+    rows: &[Row],
+    palette: Palette,
+    chosen: &mut Option<Reference>,
+) {
+    ui.label(
+        RichText::new("Study marks")
+            .font(FontId::new(14.0, theme::sans()))
+            .color(palette.ink),
+    );
+    ui.separator();
+    if rows.is_empty() {
+        ui.label(
+            RichText::new("No study marks yet")
+                .font(FontId::new(12.0, theme::sans()))
+                .color(palette.muted),
+        );
+        return;
+    }
+    for kind in RowKind::ALL {
+        let group: Vec<&Row> = rows.iter().filter(|row| row.kind == kind).collect();
+        if group.is_empty() {
+            continue;
+        }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(kind.name())
+                .font(FontId::new(11.0, theme::sans()))
+                .color(palette.muted),
+        );
+        for row in group {
+            let title = row.title();
+            if ui
+                .add_sized(
+                    [ui.available_width(), 22.0],
+                    egui::Button::new(
+                        RichText::new(title)
+                            .font(FontId::new(12.0, theme::sans()))
+                            .color(palette.ink),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                *chosen = Some(row.reference);
+            }
+        }
+    }
 }
 
 /// A one-line version of a note body, short enough for a sidebar row.
@@ -281,5 +549,44 @@ mod tests {
         let rows = rows_from_snapshot(&data);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].reference.book <= rows[1].reference.book);
+    }
+
+    #[test]
+    fn activity_covers_every_chapter_any_mark_touches() {
+        let data = StudyData {
+            highlights: vec![(verse(19, 23, 1), HighlightColour::Yellow)],
+            notes: vec![(verse(19, 23, 2), Note::new("same chapter"))],
+            bookmarks: vec![(verse(1, 1, 1), Bookmark::unlabelled())],
+            settings: Default::default(),
+        };
+        let activity = chapter_activity(&data);
+        assert_eq!(activity.len(), 2);
+        assert!(activity.contains(&(19, 23)));
+        assert!(activity.contains(&(1, 1)));
+    }
+
+    #[test]
+    fn reveal_opens_only_the_testament_of_the_place() {
+        let mut state = SidebarState::default();
+        let john = Reference::new(42, 3, None).expect("John 3 is canonical");
+        state.reveal(john);
+        assert!(!state.old_open);
+        assert!(state.new_open);
+        assert_eq!(state.expanded_book, Some(42));
+        assert!(state.filter.is_empty());
+    }
+
+    #[test]
+    fn the_filter_matches_names_and_abbreviations() {
+        let mut state = SidebarState::default();
+        let genesis = books::book(0).expect("Genesis is canonical");
+        state.filter = "gene".to_owned();
+        assert!(state.book_visible(genesis));
+        state.filter = "gen".to_owned();
+        assert!(state.book_visible(genesis));
+        state.filter = "zzz".to_owned();
+        assert!(!state.book_visible(genesis));
+        state.filter = "  ".to_owned();
+        assert!(state.book_visible(genesis));
     }
 }
