@@ -4,43 +4,122 @@
 //! The sidebar: a Books section that walks the canonical grid, and the study
 //! list it shares the column with.
 //!
-//! Both sections are read-only views of state the rest of the app owns. The
-//! Books section reads the book table and a set of chapters that carry study
-//! marks; the study list reads one store snapshot turned into rows by
-//! [`rows_from_snapshot`]. [`show`] paints both and returns the place the
-//! reader activated, and [`margin_markers`] answers the two cheap questions the
-//! reading surface asks for every visible verse. Nothing here writes to the
-//! store: a row is a place to jump to, not an edit.
+//! Both sections are read-only views of state the rest of the app owns, with
+//! one deliberate exception: a row's context menu can remove the mark the row
+//! came from. The Books section reads the book table and a set of chapters
+//! that carry study marks; the study list reads one store snapshot turned into
+//! rows by [`rows_from_snapshot`]. [`show`] paints both and returns what the
+//! reader did, and [`margin_markers`] answers the two cheap questions the
+//! reading surface asks for every visible verse.
 
 use std::collections::BTreeSet;
 
 use bible_core::study::{Store, StudyData};
-use bible_core::{Book, Reference, Testament, books};
+use bible_core::{Book, HighlightColour, Reference, Testament, Translation, books};
 use eframe::egui;
-use egui::{Color32, FontId, RichText, vec2};
+use egui::{Color32, FontId, RichText, Stroke, vec2};
 
 use crate::theme::{self, Palette};
 
 /// The width the sidebar paints at, whatever fraction of it is revealed.
 pub const SIDEBAR_WIDTH: f32 = 240.0;
 
-/// The chapters that carry at least one study mark, as canonical
-/// `(book, chapter)` pairs.
+/// What the reader did to one sidebar row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// Go to the place the row or chip names.
+    Jump(Reference),
+    /// Remove the mark the row came from.
+    Remove(Reference, RowKind),
+}
+
+/// The three kinds of study mark, in the order the sidebar groups them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RowKind {
+    /// A highlighted verse.
+    Highlight,
+    /// A verse with a note.
+    Note,
+    /// A bookmarked verse.
+    Bookmark,
+}
+
+impl RowKind {
+    /// Every kind, in the order the sidebar shows its heading.
+    pub const ALL: [Self; 3] = [Self::Highlight, Self::Note, Self::Bookmark];
+
+    /// The heading and button word for this kind.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Highlight => "Highlights",
+            Self::Note => "Notes",
+            Self::Bookmark => "Bookmarks",
+        }
+    }
+
+    /// The singular word used in a row's button.
+    pub fn singular(self) -> &'static str {
+        match self {
+            Self::Highlight => "highlight",
+            Self::Note => "note",
+            Self::Bookmark => "bookmark",
+        }
+    }
+
+    /// The word the row's context menu shows for removing this kind of mark.
+    fn removal_word(self) -> &'static str {
+        match self {
+            Self::Highlight => "Remove highlight",
+            Self::Note => "Delete note",
+            Self::Bookmark => "Remove bookmark",
+        }
+    }
+}
+
+/// One place in the sidebar, with the kind of mark that put it there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    /// The verse to jump to when the row is activated.
+    pub reference: Reference,
+    /// Which study mark this row came from.
+    pub kind: RowKind,
+    /// A short label: the colour, the note's first line, or the bookmark label.
+    pub label: String,
+    /// The highlight colour behind the row, for its swatch and its bar.
+    pub colour: Option<HighlightColour>,
+    /// The verse's own text, one line, shown under the row.
+    pub snippet: String,
+}
+
+impl Row {
+    /// The text painted in the row's button.
+    pub fn title(&self) -> String {
+        if self.label.is_empty() {
+            format!("{} · {}", self.reference, self.kind.singular())
+        } else {
+            format!(
+                "{} · {} · {}",
+                self.reference,
+                self.kind.singular(),
+                self.label
+            )
+        }
+    }
+}
+
+/// The fixed swatch a highlight colour is painted with, whatever the theme.
 ///
-/// A chapter with any kind of mark is in the set, whatever the mark is, so the
-/// chapter grid can dot a chapter without knowing which marks it holds.
-pub fn chapter_activity(data: &StudyData) -> BTreeSet<(u8, u8)> {
-    let mut chapters = BTreeSet::new();
-    for (reference, _) in &data.highlights {
-        chapters.insert((reference.book, reference.chapter));
+/// The six colours are identity, not decoration: the swatch in the sidebar and
+/// the pill row answer "which colour is this mark" the same way at every theme.
+pub fn highlight_swatch(colour: HighlightColour) -> Color32 {
+    match colour {
+        HighlightColour::Yellow => Color32::from_rgb(0xD9, 0xB2, 0x3C),
+        HighlightColour::Green => Color32::from_rgb(0x6E, 0xA8, 0x5B),
+        HighlightColour::Blue => Color32::from_rgb(0x5B, 0x8D, 0xC9),
+        HighlightColour::Pink => Color32::from_rgb(0xD1, 0x79, 0xA6),
+        HighlightColour::Orange => Color32::from_rgb(0xDE, 0x8F, 0x4E),
+        HighlightColour::Purple => Color32::from_rgb(0x93, 0x70, 0xBD),
     }
-    for (reference, _) in &data.notes {
-        chapters.insert((reference.book, reference.chapter));
-    }
-    for (reference, _) in &data.bookmarks {
-        chapters.insert((reference.book, reference.chapter));
-    }
-    chapters
 }
 
 /// The navigation and filter state the sidebar keeps between frames.
@@ -55,6 +134,8 @@ pub struct SidebarState {
     pub new_open: bool,
     /// The one book whose chapter grid is expanded.
     pub expanded_book: Option<u8>,
+    /// The highlight colour the study list is narrowed to, or `None` for all.
+    pub colour_filter: Option<HighlightColour>,
 }
 
 impl SidebarState {
@@ -103,67 +184,6 @@ pub fn filter_has_focus(ctx: &egui::Context) -> bool {
     ctx.memory(|memory| memory.focused() == Some(filter_id()))
 }
 
-/// The three kinds of study mark, in the order the sidebar groups them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RowKind {
-    /// A highlighted verse.
-    Highlight,
-    /// A verse with a note.
-    Note,
-    /// A bookmarked verse.
-    Bookmark,
-}
-
-impl RowKind {
-    /// Every kind, in the order the sidebar shows its heading.
-    pub const ALL: [Self; 3] = [Self::Highlight, Self::Note, Self::Bookmark];
-
-    /// The heading and button word for this kind.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Highlight => "Highlights",
-            Self::Note => "Notes",
-            Self::Bookmark => "Bookmarks",
-        }
-    }
-
-    /// The singular word used in a row's button.
-    pub fn singular(self) -> &'static str {
-        match self {
-            Self::Highlight => "highlight",
-            Self::Note => "note",
-            Self::Bookmark => "bookmark",
-        }
-    }
-}
-
-/// One place in the sidebar, with the kind of mark that put it there.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Row {
-    /// The verse to jump to when the row is activated.
-    pub reference: Reference,
-    /// Which study mark this row came from.
-    pub kind: RowKind,
-    /// A short label: the colour, the note's first line, or the bookmark label.
-    pub label: String,
-}
-
-impl Row {
-    /// The text painted in the row's button.
-    pub fn title(&self) -> String {
-        if self.label.is_empty() {
-            format!("{} · {}", self.reference, self.kind.singular())
-        } else {
-            format!(
-                "{} · {} · {}",
-                self.reference,
-                self.kind.singular(),
-                self.label
-            )
-        }
-    }
-}
-
 /// The two margin marks a visible verse can carry.
 ///
 /// A verse with neither mark is represented by `Default`, so the reading surface
@@ -183,11 +203,32 @@ impl MarginMarkers {
     }
 }
 
-/// Turns one study store snapshot into sidebar rows.
+/// The chapters that carry at least one study mark, as canonical
+/// `(book, chapter)` pairs.
+///
+/// A chapter with any kind of mark is in the set, whatever the mark is, so the
+/// chapter grid can dot a chapter without knowing which marks it holds.
+pub fn chapter_activity(data: &StudyData) -> BTreeSet<(u8, u8)> {
+    let mut chapters = BTreeSet::new();
+    for (reference, _) in &data.highlights {
+        chapters.insert((reference.book, reference.chapter));
+    }
+    for (reference, _) in &data.notes {
+        chapters.insert((reference.book, reference.chapter));
+    }
+    for (reference, _) in &data.bookmarks {
+        chapters.insert((reference.book, reference.chapter));
+    }
+    chapters
+}
+
+/// Turns one study store snapshot and one translation into sidebar rows.
 ///
 /// The rows are grouped by kind and keep the snapshot's canonical verse order
 /// inside each group, so a re-opened sidebar shows the same list every time.
-pub fn rows_from_snapshot(data: &StudyData) -> Vec<Row> {
+/// Each row carries a one-line snippet of the verse text in the translation
+/// given, which is what makes the list readable without jumping.
+pub fn rows_from_snapshot(data: &StudyData, translation: &Translation) -> Vec<Row> {
     let mut rows =
         Vec::with_capacity(data.highlights.len() + data.notes.len() + data.bookmarks.len());
     for (reference, colour) in &data.highlights {
@@ -195,6 +236,8 @@ pub fn rows_from_snapshot(data: &StudyData) -> Vec<Row> {
             reference: *reference,
             kind: RowKind::Highlight,
             label: colour.name().to_owned(),
+            colour: Some(*colour),
+            snippet: verse_snippet(translation, reference),
         });
     }
     for (reference, note) in &data.notes {
@@ -202,6 +245,8 @@ pub fn rows_from_snapshot(data: &StudyData) -> Vec<Row> {
             reference: *reference,
             kind: RowKind::Note,
             label: summarise(&note.body),
+            colour: None,
+            snippet: verse_snippet(translation, reference),
         });
     }
     for (reference, bookmark) in &data.bookmarks {
@@ -209,6 +254,8 @@ pub fn rows_from_snapshot(data: &StudyData) -> Vec<Row> {
             reference: *reference,
             kind: RowKind::Bookmark,
             label: bookmark.label.clone().unwrap_or_default(),
+            colour: None,
+            snippet: verse_snippet(translation, reference),
         });
     }
     rows
@@ -225,10 +272,11 @@ pub fn margin_markers(store: &Store, reference: Reference) -> MarginMarkers {
     }
 }
 
-/// Paints the sidebar and returns the place the reader activated.
+/// Paints the sidebar and returns what the reader did to it.
 ///
-/// Both the chapter grid and the study rows return references; the caller
-/// decides what a jump means and records it in its own history.
+/// Both the chapter grid and the study rows report through [`Pick`]; the
+/// caller decides what a jump means and what a removal removes, and records
+/// the jumps in its own history.
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut SidebarState,
@@ -236,8 +284,8 @@ pub fn show(
     activity: &BTreeSet<(u8, u8)>,
     current: Reference,
     palette: Palette,
-) -> Option<Reference> {
-    let mut chosen = None;
+) -> Option<Pick> {
+    let mut picked = None;
     ui.vertical(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut state.filter)
@@ -248,12 +296,12 @@ pub fn show(
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                paint_books(ui, state, activity, current, palette, &mut chosen);
+                paint_books(ui, state, activity, current, palette, &mut picked);
                 ui.add_space(4.0);
-                paint_study_marks(ui, rows, palette, &mut chosen);
+                paint_study_marks(ui, state, rows, palette, &mut picked);
             });
     });
-    chosen
+    picked
 }
 
 /// Paints the Books section: the two testament sections, their book rows, and
@@ -264,7 +312,7 @@ fn paint_books(
     activity: &BTreeSet<(u8, u8)>,
     current: Reference,
     palette: Palette,
-    chosen: &mut Option<Reference>,
+    picked: &mut Option<Pick>,
 ) {
     ui.label(
         RichText::new("Books")
@@ -312,7 +360,7 @@ fn paint_books(
         }
         if open || filtering {
             for book in list {
-                paint_book(ui, state, book, activity, current, palette, chosen);
+                paint_book(ui, state, book, activity, current, palette, picked);
             }
         }
     }
@@ -333,7 +381,7 @@ fn paint_book(
     activity: &BTreeSet<(u8, u8)>,
     current: Reference,
     palette: Palette,
-    chosen: &mut Option<Reference>,
+    picked: &mut Option<Pick>,
 ) {
     let expanded = state.expanded_book == Some(book.index);
     let here = current.book == book.index;
@@ -357,7 +405,7 @@ fn paint_book(
         state.expanded_book = if expanded { None } else { Some(book.index) };
     }
     if expanded {
-        chapter_grid(ui, book, current, activity, palette, chosen);
+        chapter_grid(ui, book, current, activity, palette, picked);
     }
 }
 
@@ -371,7 +419,7 @@ fn chapter_grid(
     current: Reference,
     activity: &BTreeSet<(u8, u8)>,
     palette: Palette,
-    chosen: &mut Option<Reference>,
+    picked: &mut Option<Pick>,
 ) {
     const PER_ROW: u8 = 7;
     const CHIP: f32 = 24.0;
@@ -404,10 +452,11 @@ fn chapter_grid(
                         palette.accent,
                     );
                 }
-                if response.clicked()
-                    && let Some(reference) = Reference::new(book.index, chapter, None).ok()
-                {
-                    *chosen = Some(reference);
+                if response.clicked() {
+                    *picked = Some(Pick::Jump(
+                        Reference::new(book.index, chapter, None)
+                            .expect("the grid chapter is canonical"),
+                    ));
                 }
             }
         });
@@ -416,11 +465,15 @@ fn chapter_grid(
 }
 
 /// Paints the study list: the grouped rows of marks the store holds.
+///
+/// Highlights carry a colour pill row that narrows the list to one colour, and
+/// every row opens a context menu that removes its mark.
 fn paint_study_marks(
     ui: &mut egui::Ui,
+    state: &mut SidebarState,
     rows: &[Row],
     palette: Palette,
-    chosen: &mut Option<Reference>,
+    picked: &mut Option<Pick>,
 ) {
     ui.label(
         RichText::new("Study marks")
@@ -430,14 +483,22 @@ fn paint_study_marks(
     ui.separator();
     if rows.is_empty() {
         ui.label(
-            RichText::new("No study marks yet")
-                .font(FontId::new(12.0, theme::sans()))
-                .color(palette.muted),
+            RichText::new(
+                "No study marks yet. Select a verse and press N to note it, \
+                 B to bookmark it, or 1 to 6 to highlight it.",
+            )
+            .font(FontId::new(12.0, theme::sans()))
+            .color(palette.muted),
         );
         return;
     }
     for kind in RowKind::ALL {
-        let group: Vec<&Row> = rows.iter().filter(|row| row.kind == kind).collect();
+        let mut group: Vec<&Row> = rows.iter().filter(|row| row.kind == kind).collect();
+        if kind == RowKind::Highlight
+            && let Some(colour) = state.colour_filter
+        {
+            group.retain(|row| row.colour == Some(colour));
+        }
         if group.is_empty() {
             continue;
         }
@@ -447,24 +508,92 @@ fn paint_study_marks(
                 .font(FontId::new(11.0, theme::sans()))
                 .color(palette.muted),
         );
+        if kind == RowKind::Highlight {
+            paint_colour_pills(ui, state, palette);
+        }
         for row in group {
-            let title = row.title();
-            if ui
-                .add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::Button::new(
-                        RichText::new(title)
-                            .font(FontId::new(12.0, theme::sans()))
-                            .color(palette.ink),
-                    )
-                    .frame(false),
-                )
-                .clicked()
-            {
-                *chosen = Some(row.reference);
-            }
+            paint_row(ui, row, palette, picked);
         }
     }
+}
+
+/// Paints the highlight colour filter: an All pill and one swatch per colour.
+fn paint_colour_pills(ui: &mut egui::Ui, state: &mut SidebarState, palette: Palette) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if ui
+            .selectable_label(
+                state.colour_filter.is_none(),
+                RichText::new("All").font(FontId::new(11.0, theme::sans())),
+            )
+            .clicked()
+        {
+            state.colour_filter = None;
+        }
+        for colour in HighlightColour::ALL {
+            let active = state.colour_filter == Some(colour);
+            let response = ui.add(
+                egui::Button::new("")
+                    .min_size(vec2(14.0, 14.0))
+                    .fill(highlight_swatch(colour))
+                    .corner_radius(7.0)
+                    .stroke(if active {
+                        Stroke::new(1.5, palette.ink)
+                    } else {
+                        Stroke::NONE
+                    }),
+            );
+            if response.clicked() {
+                state.colour_filter = if active { None } else { Some(colour) };
+            }
+        }
+    });
+}
+
+/// Paints one study row: its button, its colour bar, and its verse snippet.
+fn paint_row(ui: &mut egui::Ui, row: &Row, palette: Palette, picked: &mut Option<Pick>) {
+    let title = row.title();
+    let response = ui.add_sized(
+        [ui.available_width(), 22.0],
+        egui::Button::new(
+            RichText::new(title)
+                .font(FontId::new(12.0, theme::sans()))
+                .color(palette.ink),
+        )
+        .frame(false),
+    );
+    if let Some(colour) = row.colour {
+        let bar = row_colour_bar(response.rect);
+        ui.painter().rect_filled(bar, 1.5, highlight_swatch(colour));
+    }
+    if !row.snippet.is_empty() {
+        ui.label(
+            RichText::new(row.snippet.clone())
+                .font(FontId::new(11.0, theme::sans()))
+                .color(palette.muted),
+        );
+    }
+    if response.clicked() {
+        *picked = Some(Pick::Jump(row.reference));
+    }
+    let mut remove = false;
+    response.context_menu(|ui| {
+        if ui.button(row.kind.removal_word()).clicked() {
+            remove = true;
+        }
+    });
+    if remove {
+        *picked = Some(Pick::Remove(row.reference, row.kind));
+    }
+}
+
+/// A three point wide bar hugging a row's left edge, inset so it reads as a
+/// mark rather than a rule.
+fn row_colour_bar(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 2.0, rect.top() + 2.0),
+        vec2(3.0, rect.height() - 4.0),
+    )
 }
 
 /// A one-line version of a note body, short enough for a sidebar row.
@@ -477,6 +606,21 @@ fn summarise(body: &str) -> String {
     out
 }
 
+/// A one-line version of a verse, short enough for a row's second line.
+fn verse_snippet(translation: &Translation, reference: &Reference) -> String {
+    translation
+        .reference_text(reference)
+        .map(|text| {
+            let trimmed = text.trim();
+            let mut out: String = trimmed.chars().take(64).collect();
+            if trimmed.chars().count() > 64 {
+                out.push('…');
+            }
+            out
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use bible_core::Reference;
@@ -487,6 +631,11 @@ mod tests {
     /// A canonical verse for the sidebar tests.
     fn verse(book: u8, chapter: u8, verse: u8) -> Reference {
         Reference::new(book, chapter, Some(verse)).expect("the verse is canonical")
+    }
+
+    /// The sample translation the unit tests build rows against.
+    fn translation() -> Translation {
+        crate::sample_translation().expect("the embedded sample translation is valid")
     }
 
     #[test]
@@ -502,13 +651,29 @@ mod tests {
         store
             .set_bookmark(bookmark, Some(Bookmark::with_label("a synthetic label")))
             .expect("bookmark");
-        let rows = rows_from_snapshot(&store.snapshot());
+        let rows = rows_from_snapshot(&store.snapshot(), &translation());
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].kind, RowKind::Highlight);
         assert_eq!(rows[1].kind, RowKind::Note);
         assert_eq!(rows[2].kind, RowKind::Bookmark);
         assert_eq!(rows[0].label, "green");
         assert_eq!(rows[2].label, "a synthetic label");
+        assert_eq!(rows[0].colour, Some(HighlightColour::Green));
+        assert_eq!(rows[1].colour, None);
+    }
+
+    #[test]
+    fn rows_carry_the_verse_text_as_a_snippet() {
+        let mut store = Store::open_in_memory().expect("an in-memory store opens");
+        store
+            .set_highlight(verse(42, 3, 16), Some(HighlightColour::Blue))
+            .expect("highlight");
+        let rows = rows_from_snapshot(&store.snapshot(), &translation());
+        assert!(
+            !rows[0].snippet.is_empty(),
+            "the highlight row has no verse text"
+        );
+        assert!(rows[0].snippet.chars().count() <= 65);
     }
 
     #[test]
@@ -549,7 +714,7 @@ mod tests {
             bookmarks: Vec::new(),
             settings: Default::default(),
         };
-        let rows = rows_from_snapshot(&data);
+        let rows = rows_from_snapshot(&data, &translation());
         assert_eq!(rows.len(), 2);
         assert!(rows[0].reference.book <= rows[1].reference.book);
     }

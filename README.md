@@ -23,13 +23,19 @@ signed installer.
 - The reader scrolls continuously through the whole Bible. Each chapter is laid
   out once and kept in a layout cache, so scrolling from Genesis to Revelation
   costs the same per frame as scrolling inside one psalm.
-- A jump palette opens on command-K, a search panel on command-F, and a book
-  and chapter picker on command-B.
+- A jump palette opens on command-K, a search panel on command-F, and a sidebar
+  on command-B.
 - Highlights in six colours, notes, and bookmarks live in one SQLite file in the
   data folder. Every record is keyed by a reference in the canonical verse grid,
   so a mark follows the reader from one translation to another.
-- A study sidebar lists every highlight, note, and bookmark, and a verse that
-  carries one shows a margin mark beside it.
+- A sidebar on the left holds a Books section and the study list. The Books
+  section shows the testaments and their books, a book row expands into a grid
+  of chapter chips, a dot marks every chapter that carries a study mark, and
+  opening the sidebar reveals the chapter the reader is in. The study list shows
+  every highlight, note, and bookmark with its verse text, highlights carry
+  their colour as a bar and narrow down through a pill row, and a row's context
+  menu removes the mark it came from. A verse that carries a mark shows a margin
+  mark beside it in the text.
 - A verse menu offers highlight, note, bookmark, copy, copy with the reference,
   and compare across translations.
 - Three themes, light, sepia, and dark, and an adjustable text size, line
@@ -203,7 +209,7 @@ The reader answers to the keyboard.
 |---|---|
 | command-K | Jump to a reference |
 | command-F | Search |
-| command-B | Book and chapter picker |
+| command-B | Toggle the sidebar |
 | command-1 to command-9 | Switch to the nth translation |
 | command-[ | Back |
 | command-] | Forward |
@@ -230,8 +236,10 @@ The reader answers to the keyboard.
 The table above is the one in `crates/app/src/shortcuts.rs`. The verse numbers,
 the section headings, the Settings window, and the shortcut overlay have no key
 and are reachable from the menu bar. The parallel view is toggled from the
-**Parallel** button in the toolbar, and the study sidebar from the **Study**
-button beside it.
+**Parallel** button in the toolbar, and the book and chapter picker from the
+**Book** button beside it. The sidebar is also reachable from the **Sidebar**
+button and from a View menu item, and whether it was open is restored on the
+next launch.
 
 The themes are light, sepia, and dark. Set `BIBLE_THEME` to `light`, `sepia`, or
 `dark` to pick the one the window opens with.

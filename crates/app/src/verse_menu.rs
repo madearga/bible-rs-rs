@@ -19,6 +19,8 @@ pub enum MenuAction {
     Highlight(Option<HighlightColour>),
     /// Write the draft note.
     Note,
+    /// Remove the note from the target verse.
+    ClearNote,
     /// Toggle a bookmark.
     Bookmark,
     /// Copy the verse text.
@@ -182,6 +184,13 @@ impl VerseMenu {
                 MenuOutcome {
                     clipboard: None,
                     message: format!("note saved on {target}"),
+                }
+            }
+            MenuAction::ClearNote => {
+                store.set_note(target, "")?;
+                MenuOutcome {
+                    clipboard: None,
+                    message: format!("note removed from {target}"),
                 }
             }
             MenuAction::Bookmark => {

@@ -152,6 +152,42 @@ fn the_seeded_sidebar_lists_all_three_kinds() {
     assert_eq!(rows[0].reference, verse(42, 3, 16));
     assert_eq!(rows[1].reference, verse(42, 3, 17));
     assert_eq!(rows[2].reference, verse(42, 3, 18));
+    assert!(
+        !rows[0].snippet.is_empty(),
+        "the rows do not carry the verse text"
+    );
+}
+
+#[test]
+fn the_context_menu_removes_a_bookmark_row() {
+    let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
+    let mut harness = harness_sized("remove", egui::vec2(900.0, 1400.0));
+    harness.run();
+    harness.state_mut().set_view(ShotView::StudySidebar);
+    harness.run();
+
+    let bookmark = harness
+        .state()
+        .study_rows()
+        .iter()
+        .find(|row| row.kind == RowKind::Bookmark)
+        .expect("the demo seed has a bookmark row")
+        .clone();
+    harness.get_by_label(&bookmark.title()).click_secondary();
+    harness.run();
+    harness.get_by_label("Remove bookmark").click();
+    harness.run();
+
+    let rows = harness.state().study_rows();
+    assert_eq!(rows.len(), 2, "the bookmark row did not go away");
+    assert!(rows.iter().all(|row| row.kind != RowKind::Bookmark));
+    assert!(
+        harness
+            .state()
+            .margin_markers(bookmark.reference)
+            .is_empty(),
+        "the store still holds the bookmark"
+    );
 }
 
 #[test]

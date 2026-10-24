@@ -178,8 +178,15 @@ fuzzy book name and tolerant of typos, so `jn 3:16`, `Rom 8`, `1co13`, and even
 `revalation 21` all resolve. It also offers recent places, the installed translations, and
 the app's commands.
 
-A book and chapter picker is reachable from the toolbar and from a sidebar. Back and
-forward history work. Previous and next chapter work.
+A sidebar on the left holds a Books section and the study list, and opens or closes on the
+keyboard shortcut for command-B, from the View menu, and from the toolbar. The Books section
+shows the two testaments and their books, a book row expands into a grid of chapter chips,
+and a dot sits under every chapter that carries a study mark. Opening the sidebar reveals
+the chapter the reader is in, a filter field narrows the books by name, and the sidebar
+slides open and closed, instantly for a reader who has asked the system to reduce motion.
+Whether it was open is remembered with the other settings. The floating book and chapter
+picker is still reachable from the toolbar. Back and forward history work. Previous and
+next chapter work.
 
 The app remembers where the reader was.
 
@@ -196,7 +203,10 @@ K keys move the selection. A selected verse can be highlighted in one of six col
 a note, bookmarked, copied, or compared across translations. The context menu offers all of
 these too.
 
-Notes and bookmarks show in the margin, and a study sidebar lists everything.
+Notes and bookmarks show in the margin. The study list in the sidebar shows every highlight,
+note, and bookmark in canonical order, each with its verse text under it. A highlight row
+carries its colour as a bar, a pill row narrows the highlights to one colour, and a row's
+context menu removes the mark the row came from.
 
 ## Keyboard
 
@@ -206,7 +216,7 @@ These are the shortcuts the app uses.
 |---|---|
 | command-K | Jump palette |
 | command-F | Search |
-| command-B | Book and chapter picker |
+| command-B | Toggle the sidebar |
 | command-1 to command-9 | Switch to the nth translation |
 | command-[ and command-] | Back and forward |
 | option-left and option-right | Back and forward |

@@ -411,8 +411,29 @@ impl ReaderApp {
     /// mirror.
     fn refresh_sidebar(&mut self) {
         let data = self.study.snapshot();
-        self.study_rows = sidebar::rows_from_snapshot(&data);
+        self.study_rows = sidebar::rows_from_snapshot(&data, &self.translation);
         self.chapter_activity = sidebar::chapter_activity(&data);
+    }
+
+    /// Removes the study mark one sidebar row came from.
+    ///
+    /// The verse menu is aimed at the row's verse first, so the removal lands
+    /// on the row rather than on whatever the reader happened to select, and
+    /// the same apply path refreshes the rows and reports the outcome.
+    fn remove_study_mark(
+        &mut self,
+        reference: Reference,
+        kind: sidebar::RowKind,
+        ctx: &egui::Context,
+    ) {
+        self.selection.select(reference);
+        self.menu.open_at(reference);
+        let action = match kind {
+            sidebar::RowKind::Highlight => MenuAction::Highlight(None),
+            sidebar::RowKind::Note => MenuAction::ClearNote,
+            sidebar::RowKind::Bookmark => MenuAction::Bookmark,
+        };
+        self.apply_menu(action, ctx);
     }
 
     /// Opens the parallel view with one synthetic mark of each kind on screen.
@@ -660,7 +681,7 @@ impl ReaderApp {
         let palette = self.theme.palette();
         self.paint_toolbar(ui, palette);
 
-        let mut study_jump = None;
+        let mut picked = None;
         // The slide advances once per frame and asks for the next frame while
         // it is still moving, which is what carries the panel across. A reader
         // who asked the system to reduce motion gets the target at once.
@@ -703,7 +724,7 @@ impl ReaderApp {
                         egui::pos2(left + sidebar::SIDEBAR_WIDTH, area.bottom()),
                     );
                     let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                    study_jump = sidebar::show(
+                    picked = sidebar::show(
                         &mut content,
                         sidebar_state,
                         study_rows,
@@ -713,9 +734,16 @@ impl ReaderApp {
                     );
                 });
         }
-        if let Some(reference) = study_jump {
-            let now = ui.ctx().input(|input| input.time);
-            self.navigate(reference, now);
+        match picked {
+            Some(sidebar::Pick::Jump(reference)) => {
+                let now = ui.ctx().input(|input| input.time);
+                self.navigate(reference, now);
+            }
+            Some(sidebar::Pick::Remove(reference, kind)) => {
+                let ctx = ui.ctx().clone();
+                self.remove_study_mark(reference, kind, &ctx);
+            }
+            None => {}
         }
 
         egui::Panel::bottom("status")
