@@ -143,6 +143,8 @@ The direct dependencies of the three members are these.
 | egui | 0.36.2 | MIT OR Apache-2.0 | The widgets and the immediate-mode context |
 | egui_kittest | 0.36.2 | MIT OR Apache-2.0 | The offscreen render harness |
 | image | 0.25.10 | MIT OR Apache-2.0 | The PNG writer the render harness uses |
+| muda | 0.21.2 | Apache-2.0 OR MIT | The native macOS menu bar |
+| objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | Reading the system's reduce-motion request |
 
 ### What the dependency licences are, in full
 
