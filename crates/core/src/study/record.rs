@@ -125,7 +125,11 @@ impl Bookmark {
     }
 }
 
-/// The three themes the reader offers, chosen for long reading.
+/// The looks the reader offers: three chosen for long reading, plus the
+/// automatic one that follows the system appearance.
+///
+/// A settings row written before the automatic choice existed names a concrete
+/// theme, so an older row reads exactly as it was saved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -135,6 +139,8 @@ pub enum Theme {
     Sepia,
     /// Dimmed, but not pure black.
     Dark,
+    /// Whichever of light and dark the system is showing.
+    Auto,
 }
 
 /// Where the reader was and how it looked.

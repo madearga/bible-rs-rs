@@ -143,6 +143,35 @@ fn layout_has_a_positive_height_and_carries_the_verse_text() {
 }
 
 #[test]
+fn runs_carry_the_verse_they_belong_to() {
+    let translation = synthetic_bible();
+    let ty = typography(true);
+    let layout = layout(&translation, &ty, PROSE);
+    // A paragraph-mode line flows several verses together, and the runs keep
+    // the verses apart so the reading surface can paint behind one of them
+    // without spilling onto its neighbours.
+    let shared = layout
+        .lines
+        .iter()
+        .find(|line| {
+            line.runs.len() > 1
+                && line.runs.first().unwrap().verse != line.runs.last().unwrap().verse
+        })
+        .expect("the measure shares a line between two verses");
+    let mut last = 1u8;
+    for run in &shared.runs {
+        let verse = run
+            .verse
+            .expect("every prose run carries a verse")
+            .verse
+            .expect("the verse is numbered");
+        assert!(verse >= last, "the verse labels go backwards");
+        last = verse;
+    }
+    assert!(last > 1, "the line never reached a second verse");
+}
+
+#[test]
 fn verse_per_line_produces_more_lines_than_paragraph_mode() {
     let translation = synthetic_bible();
     let paragraph = layout(&translation, &typography(true), PROSE);
@@ -422,5 +451,28 @@ fn scroll_benchmark() {
     assert!(
         per_frame < 1000.0,
         "scrolling costs {per_frame:.2} microseconds per frame, over the 1000 microsecond budget"
+    );
+}
+
+#[test]
+fn a_jump_lands_on_the_verse_it_names() {
+    let translation = synthetic_bible();
+    let ty = typography(true);
+    let mut reader = Reader::new(Reference::new(PROSE.0, PROSE.1, None).expect("canonical"));
+    reader.set_position(Reference::new(PROSE.0, PROSE.1, Some(20)).expect("canonical"));
+    let measure = MonoMeasure::new(ty);
+    reader.frame(&translation, &ty, ty.measure(), 600.0, &measure);
+    let layout = reader
+        .layout(PROSE.0, PROSE.1)
+        .expect("the anchor chapter is laid out");
+    let top = layout.top_of_verse(20).expect("the verse exists");
+    let landed = top - reader.offset();
+    assert!(
+        (0.0..600.0).contains(&landed),
+        "verse 20 landed {landed} points from the viewport top"
+    );
+    assert!(
+        landed < ty.line_spacing() * 2.0,
+        "verse 20 landed {landed} points down, too far to see the flash"
     );
 }

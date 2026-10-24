@@ -12,8 +12,8 @@ use std::sync::Arc;
 use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke};
 
-/// The three reading themes. They are chosen for long reading, so the paper is
-/// warm rather than white and the dark theme is not black.
+/// The looks the reader offers: three chosen for long reading, plus the
+/// automatic one that follows the system appearance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Theme {
     /// Warm paper and dark ink for daylight.
@@ -22,10 +22,12 @@ pub enum Theme {
     Sepia,
     /// Charcoal paper and bone ink for a dark room.
     Dark,
+    /// Whichever of light and dark the system is showing.
+    Auto,
 }
 
 /// The palettes in the order the theme shortcut cycles them.
-pub const THEMES: [Theme; 3] = [Theme::Light, Theme::Sepia, Theme::Dark];
+pub const THEMES: [Theme; 4] = [Theme::Light, Theme::Sepia, Theme::Dark, Theme::Auto];
 
 impl Theme {
     /// The lowercase name used by the render harness and by saved preferences.
@@ -34,6 +36,7 @@ impl Theme {
             Self::Light => "light",
             Self::Sepia => "sepia",
             Self::Dark => "dark",
+            Self::Auto => "auto",
         }
     }
 
@@ -43,7 +46,19 @@ impl Theme {
             "light" => Some(Self::Light),
             "sepia" => Some(Self::Sepia),
             "dark" => Some(Self::Dark),
+            "auto" => Some(Self::Auto),
             _ => None,
+        }
+    }
+
+    /// The concrete theme a choice paints with, given the system appearance.
+    ///
+    /// Only the automatic choice depends on it; the rest are themselves.
+    pub fn resolve(self, dark: bool) -> Self {
+        match self {
+            Self::Auto if dark => Self::Dark,
+            Self::Auto => Self::Light,
+            other => other,
         }
     }
 
@@ -52,15 +67,19 @@ impl Theme {
         match self {
             Self::Light => Self::Sepia,
             Self::Sepia => Self::Dark,
-            Self::Dark => Self::Light,
+            Self::Dark => Self::Auto,
+            Self::Auto => Self::Light,
         }
     }
 
     /// The colours the reader paints with under this theme.
+    ///
+    /// The automatic choice resolves before anything paints, so this arm only
+    /// serves a caller that skipped the resolution and takes the daylight look.
     pub fn palette(self) -> Palette {
-        match self {
+        match self.resolve(false) {
             Self::Light => Palette {
-                name: self.name(),
+                name: Self::Light.name(),
                 paper: Color32::from_rgb(0xF6, 0xF1, 0xE7),
                 ink: Color32::from_rgb(0x22, 0x1D, 0x17),
                 muted: Color32::from_rgb(0x6E, 0x65, 0x59),
@@ -71,7 +90,7 @@ impl Theme {
                 words_of_christ: Color32::from_rgb(0x9B, 0x2C, 0x20),
             },
             Self::Sepia => Palette {
-                name: self.name(),
+                name: Self::Sepia.name(),
                 paper: Color32::from_rgb(0xF1, 0xE2, 0xC6),
                 ink: Color32::from_rgb(0x3A, 0x2C, 0x1B),
                 muted: Color32::from_rgb(0x7B, 0x66, 0x45),
@@ -82,7 +101,7 @@ impl Theme {
                 words_of_christ: Color32::from_rgb(0x8E, 0x2A, 0x1C),
             },
             Self::Dark => Palette {
-                name: self.name(),
+                name: Self::Dark.name(),
                 paper: Color32::from_rgb(0x1C, 0x1A, 0x17),
                 ink: Color32::from_rgb(0xE9, 0xE2, 0xD5),
                 muted: Color32::from_rgb(0x9C, 0x92, 0x84),
@@ -92,6 +111,8 @@ impl Theme {
                 selection: Color32::from_rgb(0x30, 0x2C, 0x26),
                 words_of_christ: Color32::from_rgb(0xD9, 0x7E, 0x6C),
             },
+            // Resolution never lands here, but the match must name it.
+            Self::Auto => Self::Light.palette(),
         }
     }
 

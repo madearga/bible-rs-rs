@@ -48,6 +48,13 @@ pub struct LaidRun {
     pub top: f32,
     /// The baseline this run sits on, shared with every run on its line.
     pub baseline: f32,
+    /// The verse the run's characters belong to, absent for a title, a heading,
+    /// or a gap between two verses.
+    ///
+    /// A line that opens with one verse and continues into another carries runs
+    /// of both, which is what lets the reading surface paint behind one verse's
+    /// words without spilling onto its neighbours.
+    pub verse: Option<Reference>,
 }
 
 /// One laid-out line of a chapter.
@@ -102,13 +109,20 @@ impl ChapterLayout {
         out
     }
 
-    /// The top of the first line that draws a verse number.
+    /// The top of the first line that draws a verse.
+    ///
+    /// The search runs over the placed runs, because a verse that continues a
+    /// paragraph opens no line of its own and still has a place to land.
     pub fn top_of_verse(&self, verse: u8) -> Option<f32> {
         self.lines
             .iter()
             .find(|line| {
                 line.verse
                     .is_some_and(|reference| reference.verse == Some(verse))
+                    || line.runs.iter().any(|run| {
+                        run.verse
+                            .is_some_and(|reference| reference.verse == Some(verse))
+                    })
             })
             .map(|line| line.top)
     }
@@ -189,6 +203,9 @@ pub struct Reader {
     cache: HashMap<(u8, u8), ChapterLayout>,
     key: Option<LayoutKey>,
     layout_calls: u64,
+    /// The verse the next frame should land on, set by a jump whose reference
+    /// names a verse and cleared once the offset has been placed there.
+    land_on: Option<u8>,
 }
 
 impl Reader {
@@ -200,6 +217,7 @@ impl Reader {
             cache: HashMap::new(),
             key: None,
             layout_calls: 0,
+            land_on: None,
         }
     }
 
@@ -214,9 +232,14 @@ impl Reader {
     }
 
     /// Moves the surface to a chapter and puts its top at the viewport's top.
+    /// Moves the surface to a place.
+    ///
+    /// A reference that names a verse makes the next frame land on that verse,
+    /// so a jump shows the verse it was given instead of the top of its chapter.
     pub fn set_position(&mut self, reference: Reference) {
         self.anchor = reference.chapter_only();
         self.offset = 0.0;
+        self.land_on = reference.verse;
     }
 
     /// How many chapter layouts have been computed since the last invalidation,
@@ -250,6 +273,22 @@ impl Reader {
     ) -> Frame {
         self.refresh(translation, ty, width, measure);
         self.normalize(translation, ty, width, measure);
+
+        if let Some(verse) = self.land_on.take() {
+            let top = self
+                .ensure(
+                    translation,
+                    ty,
+                    width,
+                    measure,
+                    self.anchor.book,
+                    self.anchor.chapter,
+                )
+                .top_of_verse(verse);
+            if let Some(top) = top {
+                self.offset = (top - ty.line_spacing() * 0.6).max(0.0);
+            }
+        }
 
         let mut placements = Vec::new();
         let mut book = self.anchor.book;
@@ -460,6 +499,7 @@ pub fn layout_chapter(
                 if payload.trim().is_empty() {
                     continue;
                 }
+                writer.verse = None;
                 writer.space(ty.line_spacing() * 0.5);
                 writer.start(LineKind::Heading, 0.0, None);
                 writer.text(payload, TextRole::Heading, 0.0);
@@ -473,6 +513,7 @@ pub fn layout_chapter(
         if text.trim().is_empty() {
             continue;
         }
+        writer.verse = Some(reference);
 
         let label = if ty.verse_numbers {
             Some(typography::verse_label(verse))
@@ -621,6 +662,9 @@ struct LineWriter<'a> {
     lines: Vec<Line>,
     y: f32,
     draft: Option<Draft>,
+    /// The verse whose characters are being added, which every run records so
+    /// the reading surface can tell the verses of a shared line apart.
+    verse: Option<Reference>,
 }
 
 /// A line being filled.
@@ -638,6 +682,7 @@ struct DraftRun {
     role: TextRole,
     x: f32,
     width: f32,
+    verse: Option<Reference>,
 }
 
 impl<'a> LineWriter<'a> {
@@ -649,6 +694,7 @@ impl<'a> LineWriter<'a> {
             lines: Vec::new(),
             y: 0.0,
             draft: None,
+            verse: None,
         }
     }
 
@@ -778,13 +824,18 @@ impl<'a> LineWriter<'a> {
     }
 
     /// Adds one run to the open line, merging with the previous run of the same
-    /// role so a line holds few runs.
+    /// role and the same verse so a line holds few runs.
+    ///
+    /// The verse takes part in the merge because two verses flowing in one
+    /// paragraph share a role and an edge, and a run may not span them.
     fn push_run(&mut self, text: String, role: TextRole, x: f32, width: f32) {
+        let verse = self.verse;
         let Some(draft) = self.draft.as_mut() else {
             return;
         };
         if let Some(last) = draft.runs.last_mut()
             && last.role == role
+            && last.verse == verse
             && (last.x + last.width - x).abs() < 0.01
         {
             last.text.push_str(&text);
@@ -795,6 +846,7 @@ impl<'a> LineWriter<'a> {
                 role,
                 x,
                 width,
+                verse,
             });
         }
         draft.x = x + width;
@@ -830,6 +882,7 @@ impl<'a> LineWriter<'a> {
                 width: run.width,
                 top: baseline - run.role.ascent(ty) - run.role.superscript_lift(ty),
                 baseline,
+                verse: run.verse,
             })
             .collect();
         self.lines.push(Line {

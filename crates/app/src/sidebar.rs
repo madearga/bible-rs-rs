@@ -122,6 +122,15 @@ pub fn highlight_swatch(colour: HighlightColour) -> Color32 {
     }
 }
 
+/// The translucent wash a highlight is painted with behind the words.
+///
+/// Blending the swatch over the paper dims it, and the dark paper dims it
+/// twice over, so the dark theme takes a stronger mix to stay readable.
+pub fn highlight_wash(colour: HighlightColour, palette: Palette) -> Color32 {
+    let strength = if palette.name == "dark" { 0.5 } else { 0.32 };
+    highlight_swatch(colour).gamma_multiply(strength)
+}
+
 /// The navigation and filter state the sidebar keeps between frames.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SidebarState {

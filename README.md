@@ -35,13 +35,16 @@ signed installer.
   every highlight, note, and bookmark with its verse text, highlights carry
   their colour as a bar and narrow down through a pill row, and a row's context
   menu removes the mark it came from. A verse that carries a mark shows a margin
-  mark beside it in the text.
+  mark beside it in the text, and a highlight shows in the text as a wash of its
+  colour behind the verse's own words. A jump to a verse lands on the verse, not
+  on the top of its chapter.
 - A verse menu offers highlight, note, bookmark, copy, copy with the reference,
   and compare across translations.
-- Three themes, light, sepia, and dark, and an adjustable text size, line
-  spacing, line length, justification, verse numbers, section headings,
-  paragraph mode, and words of Christ in red. Every one of those settings is
-  written to the study database and restored on the next launch.
+- Four theme choices, light, sepia, dark, and auto which follows the system's
+  dark mode, and an adjustable text size, line spacing, line length,
+  justification, verse numbers, section headings, paragraph mode, and words of
+  Christ in red. Every one of those settings is written to the study database
+  and restored on the next launch.
 - A Settings window, reachable from the macOS menu bar, edits the theme and the
   typography.
 - A native macOS menu bar, built through AppKit. It has no Edit menu, so the
@@ -241,8 +244,10 @@ and are reachable from the menu bar. The parallel view is toggled from the
 button and from a View menu item, and whether it was open is restored on the
 next launch.
 
-The themes are light, sepia, and dark. Set `BIBLE_THEME` to `light`, `sepia`, or
-`dark` to pick the one the window opens with.
+The themes are light, sepia, dark, and auto, which paints whichever of light and
+dark the system is showing and switches when the system switches. Set
+`BIBLE_THEME` to `light`, `sepia`, `dark`, or `auto` to pick the one the window
+opens with.
 
 The translation shortcuts number the installed translations first, so with
 nothing installed they number the bundled ones. `BIBLE_REFERENCE` sets the

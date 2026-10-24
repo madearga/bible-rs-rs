@@ -55,12 +55,14 @@ fn the_font_set_builds_from_the_files() {
 
 #[test]
 fn the_three_themes_have_three_different_pages() {
-    let palettes: Vec<_> = THEMES.iter().map(|theme| theme.palette()).collect();
-    assert_eq!(THEMES.len(), 3);
+    let themes = [Theme::Light, Theme::Sepia, Theme::Dark];
+    let palettes: Vec<_> = themes.iter().map(|theme| theme.palette()).collect();
+    assert_eq!(THEMES.len(), 4);
     assert_eq!(THEMES[0], Theme::Light);
     assert_eq!(THEMES[0].next(), Theme::Sepia);
     assert_eq!(THEMES[1].next(), Theme::Dark);
-    assert_eq!(THEMES[2].next(), Theme::Light);
+    assert_eq!(THEMES[2].next(), Theme::Auto);
+    assert_eq!(THEMES[3].next(), Theme::Light);
     for (index, palette) in palettes.iter().enumerate() {
         for other in &palettes[index + 1..] {
             assert_ne!(palette.paper, other.paper, "two themes share a page colour");
@@ -69,7 +71,19 @@ fn the_three_themes_have_three_different_pages() {
         assert_ne!(palette.paper, palette.ink);
     }
     assert_eq!(Theme::from_name("sepia"), Some(Theme::Sepia));
+    assert_eq!(Theme::from_name("auto"), Some(Theme::Auto));
     assert_eq!(Theme::from_name("purple"), None);
+}
+
+#[test]
+fn the_automatic_theme_resolves_to_the_system_appearance() {
+    assert_eq!(Theme::Auto.resolve(false), Theme::Light);
+    assert_eq!(Theme::Auto.resolve(true), Theme::Dark);
+    assert_eq!(Theme::Sepia.resolve(true), Theme::Sepia);
+    assert_eq!(Theme::Light.resolve(false), Theme::Light);
+    // The automatic choice paints with the daylight look only when a caller
+    // skips the resolution entirely.
+    assert_eq!(Theme::Auto.palette().name, "light");
 }
 
 #[test]

@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bible_app::app::{ShotSpec, render_shot};
+use bible_app::app::{ReaderApp, ShotSpec, ShotView, default_reference, render_shot};
 use bible_app::theme::Theme;
+use bible_core::Reference;
+use eframe::egui;
 
 /// wgpu device creation is serialised so parallel tests do not fight over the
 /// Metal device, which keeps the harness deterministic on a build machine.
@@ -117,4 +119,90 @@ fn a_filmstrip_writes_one_png_per_frame() {
     }
     assert_eq!(written[1], dir.join("frame-1.png"));
     assert_eq!(written[2], dir.join("frame-2.png"));
+}
+
+/// The widest rectangle the last frame recorded for one verse.
+fn largest_rect(rects: &[(Reference, egui::Rect)], reference: Reference) -> egui::Rect {
+    rects
+        .iter()
+        .filter(|(found, _)| *found == reference)
+        .map(|(_, rect)| *rect)
+        .max_by_key(|rect| rect.width() as u32 * rect.height() as u32)
+        .expect("the verse is on screen")
+}
+
+/// Counts the pixels a yellow highlight wash covers inside a rectangle.
+///
+/// The wash is the fixed yellow swatch blended over the paper, which reads as
+/// warm and bright; the ink, the verse numbers, the selection, and the brown
+/// flash all fall outside the test, so the count answers one question only.
+fn yellow_pixels(image: &image::RgbaImage, rect: egui::Rect) -> u32 {
+    let width = image.width() as f32;
+    let height = image.height() as f32;
+    let left = rect.min.x.max(0.0).min(width - 1.0).round() as u32;
+    let right = rect.max.x.max(1.0).min(width).round() as u32;
+    let top = rect.min.y.max(0.0).min(height - 1.0).round() as u32;
+    let bottom = rect.max.y.max(1.0).min(height).round() as u32;
+    let mut count = 0;
+    for y in top..bottom {
+        for x in left..right {
+            let pixel = image.get_pixel(x, y);
+            let (red, green, blue) = (pixel[0] as u16, pixel[1] as u16, pixel[2] as u16);
+            if red > 200 && green > blue + 35 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn a_highlighted_verse_is_painted_behind_its_words() {
+    let _guard = GPU.lock().unwrap_or_else(|error| error.into_inner());
+    let data = scratch("highlight");
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .with_pixels_per_point(1.0)
+        .with_max_steps(64)
+        .wgpu()
+        .build_eframe(move |cc| ReaderApp::open_at(cc, Theme::Light, default_reference(), &data));
+    harness.run();
+    harness.state_mut().set_view(ShotView::StudySidebar);
+    harness.run();
+
+    // The demo selects the verse it highlights, and the selection fill is
+    // opaque, so the selection moves to the bookmark verse first and the
+    // highlighted verse keeps only its wash and its flash.
+    let rects = harness.state().verse_rects().to_vec();
+    let target = largest_rect(&rects, Reference::new(42, 3, Some(18)).expect("canonical")).center();
+    harness.hover_at(target);
+    harness.event(egui::Event::PointerButton {
+        pos: target,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    harness.event(egui::Event::PointerButton {
+        pos: target,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    harness.run();
+
+    let rects = harness.state().verse_rects().to_vec();
+    let highlighted = largest_rect(&rects, Reference::new(42, 3, Some(16)).expect("canonical"));
+    let bare = largest_rect(&rects, Reference::new(42, 3, Some(18)).expect("canonical"));
+    let image = harness.render().expect("the frame renders");
+
+    let filled = yellow_pixels(&image, highlighted);
+    let untouched = yellow_pixels(&image, bare);
+    assert!(
+        filled > 500,
+        "the highlight wash covers only {filled} pixels of its verse"
+    );
+    assert!(
+        filled > untouched * 10,
+        "the unhighlighted verse shows {untouched} wash pixels against {filled}"
+    );
 }

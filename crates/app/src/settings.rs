@@ -144,5 +144,6 @@ fn title_case(theme: Theme) -> &'static str {
         Theme::Light => "Light",
         Theme::Sepia => "Sepia",
         Theme::Dark => "Dark",
+        Theme::Auto => "Auto",
     }
 }

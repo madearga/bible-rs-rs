@@ -404,6 +404,24 @@ fn a_settings_row_written_before_the_field_keeps_paragraph_mode_on() {
     assert_eq!(settings.text_size, 21.0);
 }
 
+#[test]
+fn the_automatic_theme_survives_a_store_round_trip() {
+    let db = TempDb::new("auto-theme");
+    {
+        let mut store = Store::open(db.path()).expect("the store opens");
+        let mut settings = store.settings().clone();
+        settings.theme = Theme::Auto;
+        store.set_settings(settings).expect("the settings are set");
+        store.close().expect("the settings row is written");
+    }
+    let store = Store::open(db.path()).expect("the store reopens");
+    assert_eq!(
+        store.settings().theme,
+        Theme::Auto,
+        "the automatic choice is kept as itself, not resolved at save time"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn two_spellings_of_one_database_take_one_lock() {

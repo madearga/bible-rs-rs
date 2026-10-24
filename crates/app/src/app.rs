@@ -8,7 +8,7 @@
 //! app through the toolkit's test harness and writes a PNG, which is how every
 //! change to this file is verified on a machine with no display.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -275,7 +275,14 @@ impl ReaderApp {
         } else {
             (theme, Typography::default(), false)
         };
-        theme::install(&cc.egui_ctx, theme);
+        // The automatic look resolves once here and again on every frame, so a
+        // system appearance change takes effect without a restart.
+        let look = theme.resolve(
+            cc.egui_ctx
+                .system_theme()
+                .is_some_and(|system| system == egui::Theme::Dark),
+        );
+        theme::install(&cc.egui_ctx, look);
         let translation_choices = translation_choices(&library);
         let mut app = Self {
             library,
@@ -283,7 +290,7 @@ impl ReaderApp {
             reference: start.chapter_only(),
             theme,
             typography,
-            applied_theme: Some(theme),
+            applied_theme: Some(look),
             reader: Reader::new(start.chapter_only()),
             selection: Selection::new(),
             hovered: None,
@@ -677,8 +684,7 @@ impl ReaderApp {
     }
 
     /// Paints the toolbar, the reading surface, and the status bar.
-    fn paint(&mut self, ui: &mut egui::Ui) {
-        let palette = self.theme.palette();
+    fn paint(&mut self, ui: &mut egui::Ui, palette: Palette) {
         self.paint_toolbar(ui, palette);
 
         let mut picked = None;
@@ -880,8 +886,10 @@ impl ReaderApp {
         let left = rect.min.x + ((rect.width() - width) * 0.5).max(0.0);
         let top = rect.min.y;
         let hover = ui.ctx().pointer_hover_pos();
+        let now = ui.ctx().input(|input| input.time);
         let mut rects: Vec<(Reference, Rect)> = Vec::new();
         let mut hovered = None;
+        let mut marked: HashSet<Reference> = HashSet::new();
 
         for placement in &frame.placements {
             let Some(layout) = self.reader.layout(placement.book, placement.chapter) else {
@@ -893,18 +901,62 @@ impl ReaderApp {
                 if line_top > top + viewport || line_top + line.height < top {
                     continue;
                 }
-                let right = line
-                    .runs
-                    .iter()
-                    .map(|run| run.x + run.width)
-                    .fold(line.indent, f32::max);
-                let line_rect = Rect::from_min_size(
-                    pos2(left + line.indent, line_top),
-                    vec2((right - line.indent).max(2.0), line.height),
-                );
 
-                if let Some(reference) = line.verse {
-                    let markers = sidebar::margin_markers(&self.study, reference);
+                // The line's runs in contiguous groups of one verse each, so a
+                // fill lands behind one verse's words even when the line also
+                // carries its neighbours.
+                let mut groups: Vec<(Option<Reference>, Rect)> = Vec::new();
+                for run in &line.runs {
+                    let start = left + run.x;
+                    let end = start + run.width;
+                    match groups.last_mut() {
+                        Some((verse, group))
+                            if *verse == run.verse && group.right() + 1.0 >= start =>
+                        {
+                            group.max.x = group.max.x.max(end);
+                        }
+                        _ => groups.push((
+                            run.verse,
+                            Rect::from_min_max(
+                                pos2(start, line_top),
+                                pos2(end, line_top + line.height),
+                            ),
+                        )),
+                    }
+                }
+
+                for (reference, group) in &groups {
+                    let Some(reference) = reference else {
+                        continue;
+                    };
+                    if let Some(colour) = self.study.highlight(*reference) {
+                        ui.painter().rect_filled(
+                            *group,
+                            2.0,
+                            sidebar::highlight_wash(colour, palette),
+                        );
+                    }
+                    if let Some((flash, until)) = self.flash
+                        && flash == *reference
+                        && now < until
+                    {
+                        ui.painter()
+                            .rect_filled(*group, 2.0, palette.accent.gamma_multiply(0.28));
+                    }
+                    if selection.contains(*reference) {
+                        ui.painter().rect_filled(*group, 2.0, palette.selection);
+                    }
+                    if hover.is_some_and(|position| group.contains(position)) {
+                        hovered = Some(*reference);
+                    }
+                    rects.push((*reference, *group));
+
+                    // The margin marks belong to the verse's first line, not to
+                    // every line the verse wraps onto.
+                    if !marked.insert(*reference) {
+                        continue;
+                    }
+                    let markers = sidebar::margin_markers(&self.study, *reference);
                     if markers.note {
                         ui.painter().circle_filled(
                             pos2(left - 10.0, line_top + line.height * 0.5),
@@ -922,23 +974,6 @@ impl ReaderApp {
                             palette.muted,
                         );
                     }
-                    if let Some((flash, until)) = self.flash
-                        && flash == reference
-                        && ui.ctx().input(|input| input.time) < until
-                    {
-                        ui.painter().rect_filled(
-                            line_rect,
-                            2.0,
-                            palette.accent.gamma_multiply(0.28),
-                        );
-                    }
-                    if selection.contains(reference) {
-                        ui.painter().rect_filled(line_rect, 2.0, palette.selection);
-                    }
-                    if hover.is_some_and(|position| line_rect.contains(position)) {
-                        hovered = Some(reference);
-                    }
-                    rects.push((reference, line_rect));
                 }
 
                 for run in &line.runs {
@@ -951,9 +986,12 @@ impl ReaderApp {
                     );
                 }
 
-                if hovered.is_some_and(|reference| Some(reference) == line.verse) {
+                if let Some(position) = hover
+                    && let Some((_, group)) =
+                        groups.iter().find(|(_, group)| group.contains(position))
+                {
                     ui.painter().rect_stroke(
-                        line_rect,
+                        *group,
                         2.0,
                         Stroke::new(1.0, palette.rule),
                         egui::StrokeKind::Inside,
@@ -1065,6 +1103,13 @@ impl ReaderApp {
                 }
                 let cell_rect =
                     Rect::from_min_size(pos2(x, top + row_top), vec2(width, row.height));
+                if let Some(colour) = self.study.highlight(row.reference) {
+                    ui.painter().rect_filled(
+                        cell_rect,
+                        2.0,
+                        sidebar::highlight_wash(colour, palette),
+                    );
+                }
                 if selection.contains(row.reference) {
                     ui.painter().rect_filled(cell_rect, 2.0, palette.selection);
                 }
@@ -1226,7 +1271,7 @@ impl ReaderApp {
         let changed_book = self.reference.book != reference.book;
         self.selection.select(reference);
         self.reference = reference.chapter_only();
-        self.reader.set_position(reference.chapter_only());
+        self.reader.set_position(reference);
         if let Some(view) = &mut self.parallel {
             view.set_reference(reference.chapter_only());
         }
@@ -1242,7 +1287,7 @@ impl ReaderApp {
     fn show_place(&mut self, reference: Reference, now: f64) {
         self.selection.select(reference);
         self.reference = reference.chapter_only();
-        self.reader.set_position(reference.chapter_only());
+        self.reader.set_position(reference);
         if let Some(view) = &mut self.parallel {
             view.set_reference(reference.chapter_only());
         }
@@ -1276,6 +1321,7 @@ impl ReaderApp {
             Theme::Light => StoredTheme::Light,
             Theme::Sepia => StoredTheme::Sepia,
             Theme::Dark => StoredTheme::Dark,
+            Theme::Auto => StoredTheme::Auto,
         };
         settings.text_size = self.typography.size;
         settings.line_spacing = self.typography.line_height;
@@ -1788,17 +1834,26 @@ impl Drop for ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
-    /// Paints one frame, swapping the style only when the theme changed.
+    /// Paints one frame, swapping the style only when the look changed.
+    ///
+    /// The automatic theme resolves against the system appearance here, so a
+    /// system switch to dark mode repaints the window on its next frame
+    /// without the reader touching anything.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.applied_theme != Some(self.theme) {
+        let dark = ui
+            .ctx()
+            .system_theme()
+            .is_some_and(|system| system == egui::Theme::Dark);
+        let look = self.theme.resolve(dark);
+        if self.applied_theme != Some(look) {
             let ctx = ui.ctx().clone();
-            self.theme.apply(&ctx);
-            self.applied_theme = Some(self.theme);
+            look.apply(&ctx);
+            self.applied_theme = Some(look);
         }
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
         self.handle_menu_actions(&ctx);
-        self.paint(ui);
+        self.paint(ui, look.palette());
     }
 
     /// Writes any pending settings change before the window closes.
@@ -2137,6 +2192,7 @@ fn preferences(settings: &Settings) -> (Theme, Typography) {
         StoredTheme::Light => Theme::Light,
         StoredTheme::Sepia => Theme::Sepia,
         StoredTheme::Dark => Theme::Dark,
+        StoredTheme::Auto => Theme::Auto,
     };
     let typography = Typography {
         size: settings.text_size,

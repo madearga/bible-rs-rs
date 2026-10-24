@@ -165,8 +165,9 @@ capitals at 78 percent size with the line height adjusted to match the baseline.
 Christ can be red. Translator additions can be italic. Psalm superscriptions are muted
 italic, and section headings are semibold.
 
-Three themes exist: light, sepia, and dark. They are chosen for long reading, so warm paper
-rather than pure white, and not pure black either.
+Four theme choices exist: light, sepia, dark, and auto, which paints whichever of light and
+dark the system is showing and switches when the system switches. The three concrete themes
+are chosen for long reading, so warm paper rather than pure white, and not pure black either.
 
 Text size, line spacing, line length, justification, whether verse numbers and headings
 show, and the theme are all adjustable.
@@ -203,7 +204,9 @@ K keys move the selection. A selected verse can be highlighted in one of six col
 a note, bookmarked, copied, or compared across translations. The context menu offers all of
 these too.
 
-Notes and bookmarks show in the margin. The study list in the sidebar shows every highlight,
+Notes and bookmarks show in the margin, and a highlight shows in the text as a wash of its
+colour behind the verse's own words, including the words it shares a line with. The study
+list in the sidebar shows every highlight,
 note, and bookmark in canonical order, each with its verse text under it. A highlight row
 carries its colour as a bar, a pill row narrows the highlights to one colour, and a row's
 context menu removes the mark the row came from.
