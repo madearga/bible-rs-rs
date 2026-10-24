@@ -133,8 +133,7 @@ fi
 # signature covers it and the file inside the bundle is the signed one.
 
 # The property list. The identifier is a local development identifier, and the
-# bundle carries no icon and no resources beyond the notices, so the window
-# falls back to the system's generic application icon.
+# only bundled resource besides the notices is the application icon.
 #
 # LSMinimumSystemVersion is derived from the executable's own minimum macOS
 # version rather than written by hand, so the plist cannot claim a system
@@ -177,6 +176,8 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
   <string>$BUNDLE_ID</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
   <key>CFBundleDisplayName</key>
@@ -202,6 +203,11 @@ plutil -lint "$BUNDLE_DIR/Contents/Info.plist" >/dev/null || fail "the generated
 # The notices that have to travel with the binary: the licence of this program,
 # the third-party notices, the collected licence texts, and the font licences
 # for the faces compiled into it.
+# The application icon, rendered from assets/fonts/Literata.ttf by
+# assets/icons/make-icons.py. The key above names it without the extension,
+# which is the form macOS resolves first.
+cp "$REPO_ROOT/assets/icons/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+
 cp "$REPO_ROOT/LICENSE" "$RESOURCES_DIR/LICENSE"
 cp "$REPO_ROOT/THIRD_PARTY.md" "$RESOURCES_DIR/THIRD_PARTY.md"
 cp "$REPO_ROOT/assets/fonts/OFL-Inter.txt" "$RESOURCES_DIR/OFL-Inter.txt"
